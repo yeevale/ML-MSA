@@ -353,8 +353,12 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
             elapsed = time.perf_counter() - t0
             _, peak_mem = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-            sp = sp_score(msa_result, ref)
-            tc = tc_score(msa_result, ref)
+            if ref and all(len(r) == len(ref[0]) for r in ref):
+                sp = sp_score(msa_result, ref)
+                tc = tc_score(msa_result, ref)
+            else:
+                sp = -1.0  # no valid reference
+                tc = -1.0
             return {"sp": round(sp, 4), "tc": round(tc, 4),
                     "time_s": round(elapsed, 3), "mem_mb": round(peak_mem / 1e6, 2), "ok": True}
         except Exception as e:

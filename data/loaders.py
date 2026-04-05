@@ -112,18 +112,32 @@ class BAliBASELoader:
             tree = ET.parse(str(xml_path))
             root = tree.getroot()
             aligned: list[str] = []
-            # Try common BAliBASE XML element names for sequence data
+            # Try all common BAliBASE XML element/attribute patterns
             for seq_el in root.iter():
-                if seq_el.tag in ("seq", "sequence"):
-                    # Data may be in text or a child element named 'data'/'seq'
-                    data_el = seq_el.find("data") or seq_el.find("seq")
-                    text = (data_el.text if data_el is not None else seq_el.text) or ""
+                if seq_el.tag.lower() in ("seq", "sequence", "aligned", "aln"):
+                    # Data may be in text, or child 'data'/'seq'/'aligned'
+                    data_el = (seq_el.find("data") or seq_el.find("seq")
+                               or seq_el.find("aligned"))
+                    text = (data_el.text if data_el is not None
+                            else seq_el.text) or ""
                     text = text.strip().replace(" ", "").replace("\n", "")
                     if text:
                         aligned.append(text)
-            return aligned if aligned else None
+            if aligned:
+                return aligned
         except Exception:
-            return None
+            pass
+        # Fallback: try reading as FASTA (some BAliBASE sets use .fasta/.aln)
+        for ext in [".fasta", ".fa", ".aln", ".msf"]:
+            alt = xml_path.with_suffix(ext)
+            if alt.exists():
+                try:
+                    records = load_fasta_with_gaps(str(alt))
+                    if records:
+                        return [r[1] for r in records]
+                except Exception:
+                    pass
+        return None
 
     def load_group(self, tfa_path: Path) -> dict | None:
         """Load one alignment group from a .tfa file.
@@ -150,6 +164,25 @@ class BAliBASELoader:
                 xml_ref = self._load_xml_reference(xml_path)
                 if xml_ref and len(xml_ref) == len(sequences):
                     reference = xml_ref
+            else:
+                # Try other extensions
+                for ext in [".fasta", ".fa", ".aln", ".tfa"]:
+                    alt = aligned_dir / (tfa_path.stem + ext)
+                    if alt.exists():
+                        try:
+                            recs = load_fasta_with_gaps(str(alt))
+                            if recs and len(recs) == len(sequences):
+                                reference = [r[1] for r in recs]
+                        except Exception:
+                            pass
+                        break
+
+        # Validate: reference sequences must all have the same length
+        if reference:
+            ref_lens = set(len(s) for s in reference)
+            if len(ref_lens) > 1:
+                # Unaligned reference — unusable for scoring
+                reference = None
 
         # Filter by constraints
         if len(sequences) > self.max_num_seqs:

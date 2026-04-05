@@ -211,13 +211,27 @@ def make_input(obj1: str | np.ndarray,
       matrix:  (1, 64, 64) float32
       scalars: (SCALAR_DIM,) float32
     """
-    if isinstance(obj1, str):
+    if isinstance(obj1, str) and isinstance(obj2, str):
         # Mode 1: raw sequences
         k = 4 if seq_type == "dna" else 3
         matrix = dotplot_tensor(obj1, obj2, target_size=MATRIX_SIZE, k=k)
         scalars = kmer_features(obj1, obj2, seq_type)
     else:
-        # Mode 2: profile arrays
+        # Mode 2: profile arrays (or mixed — convert string to 1-row profile)
+        if isinstance(obj1, str):
+            alpha = "ACGT-" if seq_type == "dna" else "ACDEFGHIKLMNPQRSTVWY-"
+            char_to_idx = {c: i for i, c in enumerate(alpha)}
+            prof = np.zeros((len(obj1), len(alpha)), dtype=np.float32)
+            for i, ch in enumerate(obj1.upper()):
+                prof[i, char_to_idx.get(ch, len(alpha) - 1)] = 1.0
+            obj1 = prof
+        if isinstance(obj2, str):
+            alpha = "ACGT-" if seq_type == "dna" else "ACDEFGHIKLMNPQRSTVWY-"
+            char_to_idx = {c: i for i, c in enumerate(alpha)}
+            prof = np.zeros((len(obj2), len(alpha)), dtype=np.float32)
+            for i, ch in enumerate(obj2.upper()):
+                prof[i, char_to_idx.get(ch, len(alpha) - 1)] = 1.0
+            obj2 = prof
         subst = DNA_SUBST if seq_type == "dna" else _ensure_blosum62()
         matrix = profile_similarity_matrix(obj1, obj2, subst, MATRIX_SIZE)
         scalars = profile_scalar_features(obj1, obj2, seq_type)
