@@ -320,6 +320,23 @@ def train(config: dict) -> None:
     val_ds = BandDataset([str(p) for p in val_parquets],
                          str(cache_dir / "val"))
 
+    # Precompute features if cache is incomplete (one-time CPU-parallel step)
+    train_cache = cache_dir / "train"
+    val_cache = cache_dir / "val"
+    n_train_cached = sum(1 for _ in train_cache.glob("*.npz")) if train_cache.exists() else 0
+    n_val_cached = sum(1 for _ in val_cache.glob("*.npz")) if val_cache.exists() else 0
+
+    pw = min(16, os.cpu_count() or 4)
+    if n_train_cached < len(train_ds):
+        print(f"Precomputing train features: {n_train_cached}/{len(train_ds)} cached, "
+              f"using {pw} workers...")
+        precompute_features(str(train_parquets[0]), str(train_cache), n_workers=pw)
+
+    if n_val_cached < len(val_ds):
+        print(f"Precomputing val features: {n_val_cached}/{len(val_ds)} cached, "
+              f"using {pw} workers...")
+        precompute_features(str(val_parquets[0]), str(val_cache), n_workers=pw)
+
     weights = train_ds.get_sample_weights()
     sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
 

@@ -175,9 +175,26 @@ echo ""
 echo "=== STEP 3: Neural Network Training (Stage 1 - Synthetic) ==="
 echo "Started: $(date)"
 
-# Clear stale cache and old checkpoints from previous (broken) runs
-echo "Clearing stale cache and old checkpoints..."
-rm -rf data/cache/train data/cache/val checkpoints/*.pt
+# Clear old checkpoints from previous runs (keep feature cache!)
+echo "Clearing old checkpoints..."
+rm -rf checkpoints/*.pt
+
+# Precompute features in parallel (uses all CPU cores, ~10min one-time)
+echo "Precomputing train features..."
+python -c "
+from model.train import precompute_features
+import os
+precompute_features('$TRAIN_PARQUET', 'data/cache/train', n_workers=min(16, os.cpu_count() or 4))
+" 2>&1 | tee logs/precompute_train.log
+
+echo "Precomputing val features..."
+python -c "
+import glob, os
+from model.train import precompute_features
+val_files = sorted(glob.glob('data/processed/val*.parquet'))
+if val_files:
+    precompute_features(val_files[0], 'data/cache/val', n_workers=min(16, os.cpu_count() or 4))
+" 2>&1 | tee logs/precompute_val.log
 
 python -m model.train \
     --data_dir data/processed \
@@ -188,7 +205,7 @@ python -m model.train \
     --epochs_pretrain 5 \
     --epochs_finetune 0 \
     --batch_size 512 \
-    --num_workers 4 \
+    --num_workers 16 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
     --patience 10 \
@@ -217,7 +234,7 @@ if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
         --epochs_finetune 5 \
         --lr 1e-4 \
         --batch_size 128 \
-        --num_workers 4 \
+        --num_workers 16 \
         --patience 10 \
         --device cuda \
         2>&1 | tee logs/training_stage2.log
