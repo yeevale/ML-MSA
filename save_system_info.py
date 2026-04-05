@@ -22,7 +22,7 @@ def get_system_info() -> dict:
         if torch.cuda.is_available():
             info["GPU"] = torch.cuda.get_device_name(0)
             props = torch.cuda.get_device_properties(0)
-            info["VRAM_GB"] = f"{props.total_mem / 1e9:.1f}"
+            info["VRAM_GB"] = f"{props.total_memory / 1e9:.1f}"
             info["CUDA_version"] = torch.version.cuda
     except Exception:
         pass
