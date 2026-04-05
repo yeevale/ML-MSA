@@ -353,11 +353,24 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
             elapsed = time.perf_counter() - t0
             _, peak_mem = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-            if ref and all(len(r) == len(ref[0]) for r in ref):
+
+            # Validate predicted MSA
+            if not msa_result or not all(isinstance(s, str) for s in msa_result):
+                return {"sp": 0, "tc": 0, "time_s": round(elapsed, 3),
+                        "mem_mb": round(peak_mem / 1e6, 2), "ok": False,
+                        "error": "MSA result is empty or not strings"}
+
+            # Validate and score
+            ref_valid = (ref is not None
+                         and len(ref) > 0
+                         and all(isinstance(s, str) for s in ref)
+                         and all(len(s) == len(ref[0]) for s in ref)
+                         and any('-' in s for s in ref))  # must have gaps
+            if ref_valid and len(ref) == len(msa_result):
                 sp = sp_score(msa_result, ref)
                 tc = tc_score(msa_result, ref)
             else:
-                sp = -1.0  # no valid reference
+                sp = -1.0
                 tc = -1.0
             return {"sp": round(sp, 4), "tc": round(tc, 4),
                     "time_s": round(elapsed, 3), "mem_mb": round(peak_mem / 1e6, 2), "ok": True}

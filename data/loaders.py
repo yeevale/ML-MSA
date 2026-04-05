@@ -155,27 +155,34 @@ class BAliBASELoader:
 
         # For the DATASET-BALiBASE layout, .tfa files in "Unaligned sequences/"
         # contain unaligned sequences. Try to find the reference alignment from
-        # the corresponding .xml in "Aligned sequences/".
+        # the corresponding file in "Aligned sequences/".
         reference = [r[1] for r in records]  # fallback: use tfa gaps if present
         aligned_dir = tfa_path.parent.parent / "Aligned sequences"
         if aligned_dir.exists():
-            xml_path = aligned_dir / (tfa_path.stem + ".xml")
-            if xml_path.exists():
-                xml_ref = self._load_xml_reference(xml_path)
-                if xml_ref and len(xml_ref) == len(sequences):
-                    reference = xml_ref
+            # Try aligned FASTA/TFA first (most reliable), then XML
+            for ext in [".tfa", ".fasta", ".fa", ".aln"]:
+                alt = aligned_dir / (tfa_path.stem + ext)
+                if alt.exists():
+                    try:
+                        recs = load_fasta_with_gaps(str(alt))
+                        if recs and len(recs) == len(sequences):
+                            candidate = [r_[1] for r_ in recs]
+                            # Verify: aligned seqs must all be same length
+                            if len(set(len(s) for s in candidate)) == 1:
+                                # Verify: ungapped must match original sequences
+                                ungapped = [s.replace("-", "") for s in candidate]
+                                if all(u == s for u, s in zip(ungapped, sequences)):
+                                    reference = candidate
+                    except Exception:
+                        pass
+                    break
             else:
-                # Try other extensions
-                for ext in [".fasta", ".fa", ".aln", ".tfa"]:
-                    alt = aligned_dir / (tfa_path.stem + ext)
-                    if alt.exists():
-                        try:
-                            recs = load_fasta_with_gaps(str(alt))
-                            if recs and len(recs) == len(sequences):
-                                reference = [r[1] for r in recs]
-                        except Exception:
-                            pass
-                        break
+                # Try XML as last resort
+                xml_path = aligned_dir / (tfa_path.stem + ".xml")
+                if xml_path.exists():
+                    xml_ref = self._load_xml_reference(xml_path)
+                    if xml_ref and len(xml_ref) == len(sequences):
+                        reference = xml_ref
 
         # Validate: reference sequences must all have the same length
         if reference:
@@ -217,6 +224,13 @@ class BAliBASELoader:
             g = self.load_group(tfa_path)
             if g is not None:
                 groups.append(g)
+
+        # Diagnostic: how many groups have valid aligned references
+        n_with_ref = sum(1 for g in groups
+                         if g.get("reference") is not None
+                         and len(set(len(s) for s in g["reference"])) == 1
+                         and any('-' in s for s in g["reference"]))
+        print(f"  {len(groups)} groups loaded, {n_with_ref} with valid reference alignments")
         return groups
 
     def train_val_test_split(self) -> tuple[list[dict], list[dict], list[dict]]:

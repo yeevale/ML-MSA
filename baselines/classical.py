@@ -105,7 +105,7 @@ def run_muscle(sequences: list[str],
 
 def run_clustalw(sequences: list[str],
                  ids: list[str] | None = None) -> list[str]:
-    """Run ClustalW2: clustalw2 -INFILE=... -OUTFILE=... -OUTPUT=FASTA -QUIET"""
+    """Run ClustalW: try 'clustalw2' then 'clustalw'."""
     fasta = _seqs_to_fasta(sequences, ids)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".fasta",
@@ -116,21 +116,24 @@ def run_clustalw(sequences: list[str],
     output_path = input_path + ".aln.fasta"
 
     try:
-        result = subprocess.run(
-            ["clustalw2",
-             f"-INFILE={input_path}",
-             f"-OUTFILE={output_path}",
-             "-OUTPUT=FASTA",
-             "-QUIET"],
-            capture_output=True, text=True, timeout=600)
+        for cmd_name in ["clustalw2", "clustalw"]:
+            try:
+                result = subprocess.run(
+                    [cmd_name,
+                     f"-INFILE={input_path}",
+                     f"-OUTFILE={output_path}",
+                     "-OUTPUT=FASTA",
+                     "-QUIET"],
+                    capture_output=True, text=True, timeout=600)
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"ClustalW2 failed (rc={result.returncode}): "
-                f"{result.stderr[:500]}")
+                if result.returncode == 0 and os.path.exists(output_path):
+                    with open(output_path) as f:
+                        return _parse_fasta_alignment(f.read())
+            except FileNotFoundError:
+                continue
 
-        with open(output_path) as f:
-            return _parse_fasta_alignment(f.read())
+        raise RuntimeError(
+            "ClustalW not found. Tried 'clustalw2' and 'clustalw'.")
     finally:
         for p in [input_path, output_path]:
             if os.path.exists(p):
