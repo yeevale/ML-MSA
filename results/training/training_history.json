@@ -1,0 +1,53 @@
+{
+  "best_epoch_metrics": {
+    "epoch": 0,
+    "loss": 23.667994689941406,
+    "mae_centre": 2.5441195487976076,
+    "width_ratio": 0.15846156887710094,
+    "band_recall@1.0x": 0.0,
+    "band_recall@1.5x": 0.0,
+    "band_recall@2.0x": 0.0
+  },
+  "epochs": [
+    {
+      "epoch": 0,
+      "stage": "pretrain",
+      "lr": 0.0005,
+      "train_loss": 25.717470169067383,
+      "train_mae_centre": 2.7964298248291017,
+      "loss": 23.667994689941406,
+      "mae_centre": 2.5441195487976076,
+      "width_ratio": 0.15846156887710094,
+      "band_recall@1.0x": 0.0,
+      "band_recall@1.5x": 0.0,
+      "band_recall@2.0x": 0.0
+    },
+    {
+      "epoch": 1,
+      "stage": "pretrain",
+      "lr": 0.0,
+      "train_loss": 14.859580421447754,
+      "train_mae_centre": 2.5365428924560547,
+      "loss": 21.015348815917967,
+      "mae_centre": 2.540700912475586,
+      "width_ratio": 0.2063308246433735,
+      "band_recall@1.0x": 0.0,
+      "band_recall@1.5x": 0.0,
+      "band_recall@2.0x": 0.0
+    }
+  ],
+  "config": {
+    "data_dir": "C:\\Users\\yeeva\\AppData\\Local\\Temp\\tmphrmm17cx",
+    "cache_dir": "C:\\Users\\yeeva\\AppData\\Local\\Temp\\tmphrmm17cx\\cache",
+    "checkpoint_dir": "C:\\Users\\yeeva\\AppData\\Local\\Temp\\tmphrmm17cx\\ckpt",
+    "epochs_pretrain": 2,
+    "epochs_finetune": 0,
+    "batch_size": 8,
+    "lr": 0.001,
+    "weight_decay": 0,
+    "lam": 2.0,
+    "penalty": 5.0,
+    "patience": 100,
+    "device": "cpu"
+  }
+}

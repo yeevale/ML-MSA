@@ -24,7 +24,10 @@ class BandPredictorInference:
         checkpoint = torch.load(checkpoint_path, map_location=device,
                                 weights_only=False)
         self.model = BandPredictor()
-        self.model.load_state_dict(checkpoint["model_state"])
+        state_dict = checkpoint["model_state"]
+        # Strip _orig_mod. prefix from torch.compile'd checkpoints
+        cleaned = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        self.model.load_state_dict(cleaned)
         self.model.to(device)
         self.model.eval()
 

@@ -234,7 +234,8 @@ def train(config: dict) -> None:
     """Full two-stage training loop.
 
     config keys:
-      data_dir, cache_dir, checkpoint_dir
+      data_dir, cache_dir, checkpoint_dir, results_dir
+      train_parquet (optional, explicit path to train file)
       balibase_parquet (optional, for stage 2)
       epochs_pretrain=20, epochs_finetune=10
       batch_size=128, lr=1e-3, weight_decay=1e-4
@@ -248,6 +249,8 @@ def train(config: dict) -> None:
     cache_dir = Path(config.get("cache_dir", "data/cache"))
     ckpt_dir = Path(config.get("checkpoint_dir", "checkpoints"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path(config.get("results_dir", "results/training"))
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     epochs_pre = config.get("epochs_pretrain", 20)
     epochs_ft = config.get("epochs_finetune", 10)
@@ -267,10 +270,27 @@ def train(config: dict) -> None:
                    name=config.get("wandb_run_name"),
                    config=config)
 
-    # Collect parquet files — accept both train_*.parquet and train.parquet naming
-    train_parquets = sorted(data_dir.glob("train_*.parquet"))
-    if not train_parquets:
-        train_parquets = sorted(data_dir.glob("train.parquet"))
+    # Collect parquet files
+    # If --train_parquet is given explicitly, use only that file
+    explicit_train = config.get("train_parquet")
+    if explicit_train and Path(explicit_train).exists():
+        train_parquets = [Path(explicit_train)]
+        print(f"Using explicit train parquet: {explicit_train}")
+    else:
+        # Fallback: prefer train_combined > train_full > train.parquet
+        # Do NOT glob train_*.parquet — it can pick up duplicates
+        for name in ["train_combined.parquet", "train_full.parquet", "train.parquet"]:
+            candidate = data_dir / name
+            if candidate.exists():
+                train_parquets = [candidate]
+                print(f"Auto-detected train parquet: {candidate}")
+                break
+        else:
+            # Last resort: glob
+            train_parquets = sorted(data_dir.glob("train_*.parquet"))
+            if not train_parquets:
+                train_parquets = sorted(data_dir.glob("train.parquet"))
+
     val_parquets = sorted(data_dir.glob("val_*.parquet"))
     if not val_parquets:
         val_parquets = sorted(data_dir.glob("val.parquet"))
@@ -300,9 +320,20 @@ def train(config: dict) -> None:
 
     model = BandPredictor().to(device)
 
+    # Resume from checkpoint if specified
+    resume_path = config.get("resume")
+    if resume_path and Path(resume_path).exists():
+        print(f"Resuming from: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        state_dict = ckpt["model_state"]
+        # Strip _orig_mod. prefix from torch.compile'd checkpoints
+        cleaned = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(cleaned)
+
     # GPU optimizations
     if device != "cpu":
         torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")  # use TensorFloat32 on RTX 4090
         try:
             model = torch.compile(model)
             print("torch.compile enabled")
@@ -315,9 +346,14 @@ def train(config: dict) -> None:
 
     best_recall = -1.0
     wait = 0
+    history_epochs = []  # collect per-epoch metrics for training_history.json
+    best_epoch_metrics = {}
+
+    # Get the underlying (non-compiled) model for clean state_dict saving
+    _raw_model = getattr(model, '_orig_mod', model)
 
     def run_stage(n_epochs: int, stage_name: str, start_epoch: int) -> int:
-        nonlocal best_recall, wait
+        nonlocal best_recall, wait, best_epoch_metrics
         for ep in range(n_epochs):
             epoch = start_epoch + ep
             train_metrics = train_epoch(model, train_loader, optimizer,
@@ -330,6 +366,12 @@ def train(config: dict) -> None:
             log.update({f"val/{k}": v for k, v in val_metrics.items()})
             log["lr"] = lr_now
             log["epoch"] = epoch
+
+            # Record for history
+            epoch_record = {"epoch": epoch, "stage": stage_name, "lr": lr_now}
+            epoch_record.update({f"train_{k}": v for k, v in train_metrics.items()})
+            epoch_record.update(val_metrics)
+            history_epochs.append(epoch_record)
 
             print(f"[{stage_name}] Epoch {epoch}: "
                   f"train_loss={train_metrics['loss']:.4f} "
@@ -344,7 +386,7 @@ def train(config: dict) -> None:
             if (epoch + 1) % 5 == 0:
                 torch.save({
                     "epoch": epoch,
-                    "model_state": model.state_dict(),
+                    "model_state": _raw_model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                     "config": config,
                 }, ckpt_dir / f"checkpoint_epoch{epoch}.pt")
@@ -354,9 +396,10 @@ def train(config: dict) -> None:
             if recall > best_recall:
                 best_recall = recall
                 wait = 0
+                best_epoch_metrics = {"epoch": epoch, **val_metrics}
                 torch.save({
                     "epoch": epoch,
-                    "model_state": model.state_dict(),
+                    "model_state": _raw_model.state_dict(),
                     "config": config,
                     "val_metrics": val_metrics,
                 }, ckpt_dir / "best_model.pt")
@@ -411,6 +454,19 @@ def train(config: dict) -> None:
         import wandb
         wandb.finish()
 
+    # Save training history JSON
+    import json
+    history = {
+        "best_epoch_metrics": best_epoch_metrics,
+        "epochs": history_epochs,
+        "config": {k: str(v) if isinstance(v, Path) else v
+                   for k, v in config.items()},
+    }
+    history_path = results_dir / "training_history.json"
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2, default=str)
+    print(f"Training history saved to: {history_path}")
+
     print(f"\nTraining complete. Best recall@1x: {best_recall:.4f}")
     print(f"Best model saved to: {ckpt_dir / 'best_model.pt'}")
 
@@ -418,8 +474,11 @@ def train(config: dict) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train band predictor")
     parser.add_argument("--data_dir", default="data/processed")
+    parser.add_argument("--train_parquet", default=None,
+                        help="Explicit path to training parquet file")
     parser.add_argument("--cache_dir", default="data/cache")
     parser.add_argument("--checkpoint_dir", default="checkpoints")
+    parser.add_argument("--results_dir", default="results/training")
     parser.add_argument("--balibase_parquet", default=None)
     parser.add_argument("--epochs_pretrain", type=int, default=20)
     parser.add_argument("--epochs_finetune", type=int, default=10)
@@ -430,6 +489,8 @@ if __name__ == "__main__":
     parser.add_argument("--penalty", type=float, default=5.0)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--resume", default=None,
+                        help="Path to checkpoint to resume from (e.g. checkpoints/best_model.pt)")
     parser.add_argument("--device", default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_run_name", default=None)

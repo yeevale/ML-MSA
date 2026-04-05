@@ -5,7 +5,7 @@
 #   bash vastai_run.sh 2>&1 | tee logs/full_run.log
 # =============================================================================
 
-set -e
+set -eo pipefail
 echo "=========================================="
 echo "  MSA Band Prediction — Full Run"
 echo "  Started: $(date)"
@@ -48,7 +48,7 @@ if [ "$CURRENT_TRAIN" -lt "400000" ]; then
         --seed 123 \
         2>&1 | tee logs/data_gen_dna.log
 
-    # Combine with existing
+    # Combine DNA into single file, remove extras to avoid glob collisions
     python -c "
 import pandas as pd, os
 dfs = []
@@ -58,13 +58,18 @@ for f in ['data/processed/train.parquet', 'data/processed/train_extra.parquet']:
 combined = pd.concat(dfs, ignore_index=True)
 combined.to_parquet('data/processed/train_full.parquet', index=False)
 print(f'Combined train: {len(combined)} samples')
+# Remove partial files so glob('train_*.parquet') only picks up train_full
+for f in ['data/processed/train_extra.parquet']:
+    if os.path.exists(f):
+        os.remove(f)
+        print(f'Removed {f}')
 "
     TRAIN_PARQUET="data/processed/train_full.parquet"
 else
     echo "Train data sufficient ($CURRENT_TRAIN samples)"
 fi
 
-# Generate protein data if not present
+# Generate protein data and MERGE into main train file
 if [ ! -f "data/processed/train_protein.parquet" ]; then
     echo "Generating protein training data (200k)..."
     python -m data.simulate \
@@ -74,6 +79,61 @@ if [ ! -f "data/processed/train_protein.parquet" ]; then
         --n_workers $(nproc) \
         --seed 456 \
         2>&1 | tee logs/data_gen_protein.log
+fi
+
+# Merge protein into the main training file
+python -c "
+import pandas as pd, os
+train_path = '$TRAIN_PARQUET'
+protein_path = 'data/processed/train_protein.parquet'
+if os.path.exists(train_path) and os.path.exists(protein_path):
+    df_main = pd.read_parquet(train_path)
+    df_prot = pd.read_parquet(protein_path)
+    combined = pd.concat([df_main, df_prot], ignore_index=True)
+    combined.to_parquet('data/processed/train_combined.parquet', index=False)
+    print(f'Combined DNA+protein train: {len(combined)} samples')
+    # Clean up individual files, keep only train_combined
+    for f in [protein_path]:
+        if os.path.exists(f) and f != 'data/processed/train_combined.parquet':
+            os.remove(f)
+            print(f'Removed {f}')
+else:
+    print('Skipping protein merge (files not found)')
+"
+TRAIN_PARQUET="data/processed/train_combined.parquet"
+
+# Generate validation data if missing
+if [ ! -f "data/processed/val.parquet" ]; then
+    echo "Generating validation data (10k DNA + 2k protein)..."
+    python -m data.simulate \
+        --n_samples 10000 \
+        --seq_type dna \
+        --output data/processed/val_dna.parquet \
+        --n_workers $(nproc) \
+        --seed 789 \
+        2>&1 | tee logs/data_gen_val.log
+
+    python -m data.simulate \
+        --n_samples 2000 \
+        --seq_type protein \
+        --output data/processed/val_protein.parquet \
+        --n_workers $(nproc) \
+        --seed 790 \
+        2>&1 | tee -a logs/data_gen_val.log
+
+    python -c "
+import pandas as pd, os
+dfs = []
+for f in ['data/processed/val_dna.parquet', 'data/processed/val_protein.parquet']:
+    if os.path.exists(f):
+        dfs.append(pd.read_parquet(f))
+combined = pd.concat(dfs, ignore_index=True)
+combined.to_parquet('data/processed/val.parquet', index=False)
+print(f'Validation set: {len(combined)} samples')
+for f in ['data/processed/val_dna.parquet', 'data/processed/val_protein.parquet']:
+    if os.path.exists(f):
+        os.remove(f)
+"
 fi
 
 echo "Data generation complete."
@@ -91,6 +151,7 @@ if [ -d "$BALIBASE_DIR" ]; then
     python -c "
 from data.loaders import BAliBASELoader
 import json
+import pandas as pd
 
 loader = BAliBASELoader('$BALIBASE_DIR')
 groups = loader.load_all()
@@ -100,9 +161,41 @@ train_g, val_g, test_g = loader.train_val_test_split()
 print(f'Train: {len(train_g)}, Val: {len(val_g)}, Test: {len(test_g)}')
 
 for split_name, split_data in [('train', train_g), ('val', val_g), ('test', test_g)]:
+    # Save JSON (for reference)
     with open(f'data/balibase_{split_name}.json', 'w') as f:
         json.dump(split_data, f, default=str)
     print(f'Saved balibase_{split_name}.json')
+
+# Also save train split as parquet for model.train Stage 2
+rows = []
+for g in train_g:
+    seqs = g['sequences']
+    ids = g.get('seq_ids', [f'seq{i}' for i in range(len(seqs))])
+    # Create all pairwise combinations
+    for i in range(len(seqs)):
+        for j in range(i + 1, len(seqs)):
+            s1, s2 = seqs[i], seqs[j]
+            n = max(len(s1), len(s2))
+            # Simple divergence estimate
+            min_len = min(len(s1), len(s2))
+            mismatches = sum(1 for a, b in zip(s1[:min_len], s2[:min_len]) if a != b)
+            div = mismatches / max(min_len, 1)
+            # seq_type: detect protein (has non-ACGT chars)
+            charset = set(s1.upper() + s2.upper())
+            is_protein = bool(charset - set('ACGTNU-'))
+            rows.append({
+                'seq1': s1, 'seq2': s2,
+                'centre_diag': 0,
+                'true_half_width': max(10, int(n * 0.15)),
+                'divergence': round(div, 4),
+                'seq_type': 'protein' if is_protein else 'dna',
+            })
+if rows:
+    df = pd.DataFrame(rows)
+    df.to_parquet('data/balibase_train.parquet', index=False)
+    print(f'Saved balibase_train.parquet ({len(df)} pairs)')
+else:
+    print('WARNING: No BAliBASE pairs generated')
 " 2>&1 | tee logs/balibase_prep.log
     BALIBASE_AVAILABLE=1
 else
@@ -116,14 +209,20 @@ echo ""
 echo "=== STEP 3: Neural Network Training (Stage 1 - Synthetic) ==="
 echo "Started: $(date)"
 
+# Clear stale cache and old checkpoints from previous (broken) runs
+echo "Clearing stale cache and old checkpoints..."
+rm -rf data/cache/train data/cache/val checkpoints/*.pt
+
 python -m model.train \
     --data_dir data/processed \
+    --train_parquet $TRAIN_PARQUET \
     --cache_dir data/cache \
     --checkpoint_dir checkpoints \
+    --results_dir results/training \
     --epochs_pretrain 20 \
     --epochs_finetune 0 \
-    --batch_size 1024 \
-    --num_workers 8 \
+    --batch_size 512 \
+    --num_workers 4 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
     --patience 5 \
@@ -142,13 +241,17 @@ if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
 
     python -m model.train \
         --data_dir data/processed \
-        --balibase_parquet data/balibase_train.json \
+        --train_parquet $TRAIN_PARQUET \
+        --balibase_parquet data/balibase_train.parquet \
         --cache_dir data/cache \
         --checkpoint_dir checkpoints \
+        --results_dir results/training \
+        --resume checkpoints/best_model.pt \
         --epochs_pretrain 0 \
         --epochs_finetune 10 \
         --lr 1e-4 \
         --batch_size 128 \
+        --num_workers 4 \
         --patience 5 \
         --device cuda \
         2>&1 | tee logs/training_stage2.log
@@ -186,9 +289,37 @@ echo "Experiments complete: $(date)"
 echo ""
 echo "=== STEP 6: Full Test Suite ==="
 
+pip install --quiet pytest-json-report 2>/dev/null || true
+
 python -m pytest tests/ \
     -v --tb=short \
+    --json-report --json-report-file=results/tests/full_test_report.json \
     2>&1 | tee logs/test_full.log
+
+# Fallback: if pytest-json-report is not available, generate basic report
+if [ ! -f "results/tests/full_test_report.json" ]; then
+    python -c "
+import json, subprocess, re
+output = open('logs/test_full.log').read()
+# Parse basic summary from pytest output
+passed = len(re.findall(r'PASSED', output))
+failed = len(re.findall(r'FAILED', output))
+skipped = len(re.findall(r'SKIPPED', output))
+total = passed + failed + skipped
+report = {
+    'summary': {
+        'total': total,
+        'passed': passed,
+        'failed': failed,
+        'skipped': skipped,
+        'duration': 0,
+    }
+}
+with open('results/tests/full_test_report.json', 'w') as f:
+    json.dump(report, f, indent=2)
+print(f'Generated test report: {total} total, {passed} passed, {failed} failed, {skipped} skipped')
+"
+fi
 
 # --------------------------------------------------------------------------
 # STEP 7: Generate Final Report

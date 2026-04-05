@@ -22,8 +22,8 @@ from scoring.metrics import sp_score, tc_score
 from model.evaluate import BandPredictorInference
 import aligner
 
-BALIBASE_DIR = "data/raw/balibase"
-CHECKPOINT = "checkpoints/best.pt"
+BALIBASE_DIR = "data/raw/balibase/DATASET-BALiBASE"
+CHECKPOINT = "checkpoints/best_model.pt"
 
 
 @pytest.fixture(scope="module")
