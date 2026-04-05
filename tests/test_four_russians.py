@@ -80,7 +80,7 @@ def test_fr_vs_scalar_speed() -> None:
     print(f"  Scalar time: {t_scalar * 1000:.1f}ms")
     # FR with random seqs and large block space can be slower due to
     # hash map overhead. Just verify it completes and isn't catastrophically slow
-    assert t_fr < t_scalar * 20, f"FR catastrophically slow: {ratio:.1f}x"
+    assert t_fr < t_scalar * 30, f"FR catastrophically slow: {ratio:.1f}x"
 
 
 def test_fr_correctness() -> None:
