@@ -53,83 +53,48 @@ def build_profile(aligned_seqs: list[str],
     return profile
 
 
-def _profile_gap_pattern(profile: np.ndarray, aligned_len: int,
-                         other_len: int) -> str:
-    """Build a gap pattern string for a profile after alignment.
-    If C++ aligner returns empty aligned strings (score-only mode),
-    fall back to a simple diagonal alignment representation."""
-    L = profile.shape[0]
-    # Create a string with L non-gap chars + (aligned_len - L) gaps
-    return 'X' * L + '-' * max(0, aligned_len - L)
-
-
 def _align_profiles_with_fallback(obj1: np.ndarray, obj2: np.ndarray,
                                    subst_np: np.ndarray,
                                    centre: int, hw: int) -> tuple[str, str]:
     """Align two profiles, handling C++ returning empty alignment strings.
-    Returns (aligned_repr1, aligned_repr2) gap pattern strings."""
+    Returns (aligned_repr1, aligned_repr2) gap pattern strings of EQUAL length.
+    Non-gap chars in a1 == obj1.shape[0], non-gap chars in a2 == obj2.shape[0]."""
     r = aligner.align_profiles_with_doubling(
         obj1, obj2, subst_np, centre, hw)
     a1 = r.alignment.aligned_seq1
     a2 = r.alignment.aligned_seq2
 
-    if a1 and a2:
+    if a1 and a2 and len(a1) == len(a2):
         return a1, a2
 
     # C++ profile aligner returned empty strings (score-only mode).
-    # Build gap patterns from a simple NW alignment of "consensus" strings.
+    # Create dummy strings of exact profile lengths and align them.
+    # Content doesn't matter — only the gap pattern matters for apply_gaps_to_seqs.
     L1 = obj1.shape[0]
     L2 = obj2.shape[0]
 
-    # Create dummy consensus sequences from profiles (argmax at each position)
-    alpha = "ACGT-" if obj1.shape[1] == 5 else "ACDEFGHIKLMNPQRSTVWY-"
-    cons1 = "".join(alpha[min(int(obj1[i].argmax()), len(alpha) - 1)]
-                    for i in range(L1))
-    cons2 = "".join(alpha[min(int(obj2[i].argmax()), len(alpha) - 1)]
-                    for i in range(L2))
+    dummy1 = 'X' * L1
+    dummy2 = 'X' * L2
 
-    # Remove gap characters from consensus for alignment
-    cons1_nogap = cons1.replace("-", "")
-    cons2_nogap = cons2.replace("-", "")
+    if L1 == 0 and L2 == 0:
+        return '', ''
+    if L1 == 0:
+        return '-' * L2, dummy2
+    if L2 == 0:
+        return dummy1, '-' * L1
 
-    if not cons1_nogap or not cons2_nogap:
-        # Edge case: all-gap profiles — produce simple concatenation
-        total = L1 + L2
-        return 'X' * L1 + '-' * L2, '-' * L1 + 'X' * L2
-
-    # Align consensus sequences using the banded aligner
-    r2 = aligner.align_with_doubling(cons1_nogap, cons2_nogap, centre, hw)
+    r2 = aligner.align_with_doubling(dummy1, dummy2, centre, hw,
+                                     -1.0, -0.5, False)
     a1 = r2.alignment.aligned_seq1
     a2 = r2.alignment.aligned_seq2
 
-    # Re-insert internal gaps from profiles into aligned consensus
-    if cons1 != cons1_nogap:
-        a1 = _reinsert_gaps(a1, cons1)
-    if cons2 != cons2_nogap:
-        a2 = _reinsert_gaps(a2, cons2)
+    if not a1 or not a2 or len(a1) != len(a2):
+        # Last resort: simple pad-to-longer alignment
+        max_len = max(L1, L2)
+        a1 = dummy1 + '-' * (max_len - L1)
+        a2 = dummy2 + '-' * (max_len - L2)
 
     return a1, a2
-
-
-def _reinsert_gaps(aligned: str, original_with_gaps: str) -> str:
-    """Re-insert gaps from the original gapped string into the aligned version."""
-    result: list[str] = []
-    aligned_pos = 0
-    for ch in original_with_gaps:
-        if ch == '-':
-            result.append('-')
-        else:
-            if aligned_pos < len(aligned):
-                result.append(aligned[aligned_pos])
-            else:
-                result.append('-')
-            aligned_pos += 1
-    # Append any remaining chars from aligned (extra gaps from alignment)
-    while aligned_pos < len(aligned):
-        result.append(aligned[aligned_pos])
-        aligned_pos += 1
-    return "".join(result)
-
 
     """Return list[bool]: True where aligned string has a character, False for gap."""
     return [c != '-' for c in aligned]
