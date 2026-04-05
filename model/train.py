@@ -359,12 +359,11 @@ def train(config: dict) -> None:
 
     best_val_loss = float("inf")
     best_recall = -1.0
-    wait = 0
     history_epochs = []  # collect per-epoch metrics for training_history.json
     best_epoch_metrics = {}
 
     def run_stage(n_epochs: int, stage_name: str, start_epoch: int) -> int:
-        nonlocal best_val_loss, best_recall, wait, best_epoch_metrics
+        nonlocal best_val_loss, best_recall, best_epoch_metrics
         for ep in range(n_epochs):
             epoch = start_epoch + ep
             train_metrics = train_epoch(model, train_loader, optimizer,
@@ -405,12 +404,10 @@ def train(config: dict) -> None:
                     "config": config,
                 }, ckpt_dir / f"checkpoint_epoch{epoch}.pt")
 
-            # Best model — use val_loss for early stopping (stable & monotonic)
-            # recall@1x is noisy because it rewards width overestimation
+            # Save best model by val_loss (no early stopping — always run all epochs)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_recall = recall
-                wait = 0
                 best_epoch_metrics = {"epoch": epoch, **val_metrics}
                 torch.save({
                     "epoch": epoch,
@@ -420,11 +417,6 @@ def train(config: dict) -> None:
                 }, ckpt_dir / "best_model.pt")
                 print(f"  → New best val_loss: {best_val_loss:.4f} "
                       f"(recall@1x: {recall:.4f})")
-            else:
-                wait += 1
-                if wait >= patience:
-                    print(f"  Early stopping after {patience} epochs without improvement")
-                    return epoch + 1
 
         return start_epoch + n_epochs
 
@@ -461,7 +453,6 @@ def train(config: dict) -> None:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=epochs_ft)
 
-        wait = 0  # reset patience
         run_stage(epochs_ft, "finetune", next_epoch)
     else:
         print("\nNo BAliBASE parquet found, skipping Stage 2")
