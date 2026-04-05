@@ -357,6 +357,8 @@ def train(config: dict) -> None:
         print(f"Resuming from checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         state = ckpt.get("model_state", ckpt)  # handle both formats
+        # Strip _orig_mod. prefix added by torch.compile
+        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
         model.load_state_dict(state)
         print("Loaded model weights from checkpoint")
 
@@ -378,6 +380,11 @@ def train(config: dict) -> None:
     best_recall = -1.0
     history_epochs = []  # collect per-epoch metrics for training_history.json
     best_epoch_metrics = {}
+
+    def _clean_state_dict():
+        """Strip _orig_mod. prefix from torch.compile'd model."""
+        return {k.removeprefix("_orig_mod."): v
+                for k, v in model.state_dict().items()}
 
     def run_stage(n_epochs: int, stage_name: str, start_epoch: int) -> int:
         nonlocal best_val_loss, best_recall, best_epoch_metrics
@@ -416,7 +423,7 @@ def train(config: dict) -> None:
             if (epoch + 1) % 5 == 0:
                 torch.save({
                     "epoch": epoch,
-                    "model_state": model.state_dict(),
+                    "model_state": _clean_state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                     "config": config,
                 }, ckpt_dir / f"checkpoint_epoch{epoch}.pt")
@@ -428,7 +435,7 @@ def train(config: dict) -> None:
                 best_epoch_metrics = {"epoch": epoch, **val_metrics}
                 torch.save({
                     "epoch": epoch,
-                    "model_state": model.state_dict(),
+                    "model_state": _clean_state_dict(),
                     "config": config,
                     "val_metrics": val_metrics,
                 }, ckpt_dir / "best_model.pt")
