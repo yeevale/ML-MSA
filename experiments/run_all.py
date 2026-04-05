@@ -369,6 +369,12 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
     # Limit to 30 groups for speed
     groups = balibase_groups[:30]
 
+    # Detect seq_type: BAliBASE is mostly protein
+    def _detect_seq_type(seqs: list[str]) -> str:
+        sample = "".join(s[:100] for s in seqs[:5]).upper()
+        non_dna = sum(1 for c in sample if c not in "ACGTNU-")
+        return "protein" if non_dna > len(sample) * 0.1 else "dna"
+
     # For fixed-band experiments, use aligner directly with pairwise alignment
     # (this is an ablation baseline — not full progressive MSA)
     import aligner
@@ -377,14 +383,13 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
         """Simple pairwise-based MSA with fixed band (ablation only for pairs)."""
         if len(seqs) <= 1:
             return seqs
-        # For ablation, just do progressive MSA with a dummy predictor that returns fixed hw
-        # Since progressive_msa needs a predictor, we create a simple wrapper
+        st = _detect_seq_type(seqs)
         class FixedPredictor:
             def predict_single(self, s1, s2, seq_type="dna"):
                 return (0, hw)
             def predict_batch(self, pairs, seq_type="dna"):
                 return [(0, hw) for _ in pairs]
-        return progressive_msa(seqs, ids, FixedPredictor())
+        return progressive_msa(seqs, ids, FixedPredictor(), seq_type=st)
 
     methods = {}
 
@@ -409,10 +414,18 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
     methods["Fixed_W30"]  = lambda s, ids: fixed_band_pairwise(s, ids, hw=30)
     methods["Fixed_W100"] = lambda s, ids: fixed_band_pairwise(s, ids, hw=100)
 
-    # Neural methods
-    methods["Neural_band"]     = lambda s, ids: progressive_msa(s, ids, predictor)
-    methods["Neural_+_refine"] = lambda s, ids: iterative_refine(
-        progressive_msa(s, ids, predictor), s, predictor)
+    # Neural methods (auto-detect seq_type per group)
+    def neural_band(s, ids):
+        st = _detect_seq_type(s)
+        return progressive_msa(s, ids, predictor, seq_type=st)
+
+    def neural_refine(s, ids):
+        st = _detect_seq_type(s)
+        msa = progressive_msa(s, ids, predictor, seq_type=st)
+        return iterative_refine(msa, s, predictor)
+
+    methods["Neural_band"]     = neural_band
+    methods["Neural_+_refine"] = neural_refine
 
     all_rows = []
     for method_name, method_fn in methods.items():

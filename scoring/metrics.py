@@ -27,14 +27,17 @@ def _build_residue_map(msa: list[str]) -> list[dict[int, int]]:
 
 def sp_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
-    """Sum-of-Pairs score (BAliBASE standard).
-    For each pair (i,j) and each column k in reference:
-      If both reference[i][k] and reference[j][k] are non-gap:
-        Map to residue indices, check if predicted aligns them identically.
-    SP = correct_pairs / total_pairs_in_reference."""
+    """Sum-of-Pairs score (BAliBASE standard)."""
     n = len(reference_msa)
     if n < 2:
         return 1.0
+    # Validate lengths
+    if len(predicted_msa) != n:
+        return 0.0
+    if any(len(s) != len(reference_msa[0]) for s in reference_msa):
+        return 0.0
+    if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
+        return 0.0
 
     ref_maps = _build_residue_map(reference_msa)
     pred_maps = _build_residue_map(predicted_msa)
@@ -79,13 +82,17 @@ def sp_score(predicted_msa: list[str],
 
 def tc_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
-    """Total Column score.
-    For each column k in reference: extract non-gap residue indices for all seqs.
-    Check if predicted has the exact same set of residues in one column.
-    TC = matching_columns / total_reference_columns_with_nongap."""
+    """Total Column score."""
     n = len(reference_msa)
     if n < 2:
         return 1.0
+    # Validate lengths
+    if len(predicted_msa) != n:
+        return 0.0
+    if any(len(s) != len(reference_msa[0]) for s in reference_msa):
+        return 0.0
+    if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
+        return 0.0
 
     ref_maps = _build_residue_map(reference_msa)
     pred_maps = _build_residue_map(predicted_msa)
@@ -133,13 +140,13 @@ def tc_score(predicted_msa: list[str],
 
 
 def sp_score_internal(msa: list[str], seq_type: str = "dna") -> float:
-    """SP-score without reference — for iterative refinement.
-    Sum of match scores over all pairwise non-gap positions.
-    Normalised by number of pairs × alignment length."""
+    """SP-score without reference — for iterative refinement."""
     n = len(msa)
     if n < 2:
         return 0.0
     L = len(msa[0])
+    if L == 0 or any(len(s) != L for s in msa):
+        return 0.0
     total = 0.0
     count = 0
     for i in range(n):
