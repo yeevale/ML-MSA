@@ -68,15 +68,29 @@ class BandDataset(Dataset):
         row = self.df.iloc[idx]
         cp = self._cache_path(idx)
 
+        matrix = None
+        scalars = None
+
+        # Try loading from cache
         if cp is not None and cp.exists():
-            data = np.load(cp)
-            matrix = data["matrix"]
-            scalars = data["scalars"]
-        else:
+            try:
+                data = np.load(cp)
+                matrix = data["matrix"]
+                scalars = data["scalars"]
+            except Exception:
+                # Corrupted cache file — delete and recompute
+                cp.unlink(missing_ok=True)
+                matrix = None
+
+        # Compute if not cached or cache was corrupted
+        if matrix is None:
             seq_type = row["seq_type"] if "seq_type" in row.index else "dna"
             matrix, scalars = make_input(row["seq1"], row["seq2"], seq_type)
             if cp is not None:
-                np.savez_compressed(cp, matrix=matrix, scalars=scalars)
+                try:
+                    np.savez_compressed(cp, matrix=matrix, scalars=scalars)
+                except Exception:
+                    pass  # disk full or permission error — skip caching
 
         seq_type_str = row.get("seq_type", "dna")
         return {
@@ -320,16 +334,6 @@ def train(config: dict) -> None:
 
     model = BandPredictor().to(device)
 
-    # Resume from checkpoint if specified
-    resume_path = config.get("resume")
-    if resume_path and Path(resume_path).exists():
-        print(f"Resuming from: {resume_path}")
-        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
-        state_dict = ckpt["model_state"]
-        # Strip _orig_mod. prefix from torch.compile'd checkpoints
-        cleaned = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-        model.load_state_dict(cleaned)
-
     # GPU optimizations
     if device != "cpu":
         torch.backends.cudnn.benchmark = True
@@ -348,9 +352,6 @@ def train(config: dict) -> None:
     wait = 0
     history_epochs = []  # collect per-epoch metrics for training_history.json
     best_epoch_metrics = {}
-
-    # Get the underlying (non-compiled) model for clean state_dict saving
-    _raw_model = getattr(model, '_orig_mod', model)
 
     def run_stage(n_epochs: int, stage_name: str, start_epoch: int) -> int:
         nonlocal best_recall, wait, best_epoch_metrics
@@ -386,7 +387,7 @@ def train(config: dict) -> None:
             if (epoch + 1) % 5 == 0:
                 torch.save({
                     "epoch": epoch,
-                    "model_state": _raw_model.state_dict(),
+                    "model_state": model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                     "config": config,
                 }, ckpt_dir / f"checkpoint_epoch{epoch}.pt")
@@ -399,7 +400,7 @@ def train(config: dict) -> None:
                 best_epoch_metrics = {"epoch": epoch, **val_metrics}
                 torch.save({
                     "epoch": epoch,
-                    "model_state": _raw_model.state_dict(),
+                    "model_state": model.state_dict(),
                     "config": config,
                     "val_metrics": val_metrics,
                 }, ckpt_dir / "best_model.pt")
@@ -489,8 +490,6 @@ if __name__ == "__main__":
     parser.add_argument("--penalty", type=float, default=5.0)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--resume", default=None,
-                        help="Path to checkpoint to resume from (e.g. checkpoints/best_model.pt)")
     parser.add_argument("--device", default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_run_name", default=None)
