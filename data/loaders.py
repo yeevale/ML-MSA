@@ -61,20 +61,69 @@ class BAliBASELoader:
         self.max_seq_len = max_seq_len
         self.max_num_seqs = max_num_seqs
 
+    # Map filename prefix (BB11 / bb11) to RV class
+    _PREFIX_TO_CLASS = {
+        "bb11": "RV11", "bb12": "RV12", "bb20": "RV20",
+        "bb30": "RV30", "bb40": "RV40", "bb50": "RV50",
+    }
+
+    @staticmethod
+    def _stem_to_class(stem: str) -> str:
+        """Derive RVxx class from filename stem like BB11001 or RV11_..."""
+        s = stem.lower()
+        for prefix, cls in BAliBASELoader._PREFIX_TO_CLASS.items():
+            if s.startswith(prefix):
+                return cls
+        for cls in ["RV11", "RV12", "RV20", "RV30", "RV40", "RV50"]:
+            if cls.lower() in s:
+                return cls
+        return "unknown"
+
     def _find_tfa_files(self, ref_classes: list[str] | None = None) -> list[Path]:
         """Find all .tfa files, optionally filtered by reference class."""
-        tfa_files: list[Path] = []
         if ref_classes is None:
             ref_classes = ["RV11", "RV12", "RV20", "RV30", "RV40", "RV50"]
+        ref_classes_lower = {rc.lower() for rc in ref_classes}
+        tfa_files: list[Path] = []
+
+        # Layout 1: DATASET-BALiBASE/Unaligned sequences/*.tfa  (new layout)
+        unaligned_dir = self.data_dir / "Unaligned sequences"
+        if unaligned_dir.exists():
+            for f in sorted(unaligned_dir.glob("*.tfa")):
+                cls = self._stem_to_class(f.stem)
+                if cls.lower() in ref_classes_lower or cls == "unknown":
+                    tfa_files.append(f)
+
+        # Layout 2: DATASET-BALiBASE/RV11/*.tfa  (classic layout)
         for rc in ref_classes:
             rc_dir = self.data_dir / rc
             if rc_dir.exists():
                 tfa_files.extend(sorted(rc_dir.glob("*.tfa")))
-            # Also try bb* subdirectories (some BAliBASE layouts)
             for sub in sorted(self.data_dir.glob(f"{rc}*")):
                 if sub.is_dir():
                     tfa_files.extend(sorted(sub.glob("*.tfa")))
+
         return list(dict.fromkeys(tfa_files))  # deduplicate preserving order
+
+    def _load_xml_reference(self, xml_path: Path) -> list[str] | None:
+        """Parse BAliBASE XML alignment file. Returns list of aligned sequences."""
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(str(xml_path))
+            root = tree.getroot()
+            aligned: list[str] = []
+            # Try common BAliBASE XML element names for sequence data
+            for seq_el in root.iter():
+                if seq_el.tag in ("seq", "sequence"):
+                    # Data may be in text or a child element named 'data'/'seq'
+                    data_el = seq_el.find("data") or seq_el.find("seq")
+                    text = (data_el.text if data_el is not None else seq_el.text) or ""
+                    text = text.strip().replace(" ", "").replace("\n", "")
+                    if text:
+                        aligned.append(text)
+            return aligned if aligned else None
+        except Exception:
+            return None
 
     def load_group(self, tfa_path: Path) -> dict | None:
         """Load one alignment group from a .tfa file.
@@ -88,8 +137,19 @@ class BAliBASELoader:
             return None
 
         seq_ids = [r[0] for r in records]
-        reference = [r[1] for r in records]  # with gaps
         sequences = [r[1].replace("-", "") for r in records]  # without gaps
+
+        # For the DATASET-BALiBASE layout, .tfa files in "Unaligned sequences/"
+        # contain unaligned sequences. Try to find the reference alignment from
+        # the corresponding .xml in "Aligned sequences/".
+        reference = [r[1] for r in records]  # fallback: use tfa gaps if present
+        aligned_dir = tfa_path.parent.parent / "Aligned sequences"
+        if aligned_dir.exists():
+            xml_path = aligned_dir / (tfa_path.stem + ".xml")
+            if xml_path.exists():
+                xml_ref = self._load_xml_reference(xml_path)
+                if xml_ref and len(xml_ref) == len(sequences):
+                    reference = xml_ref
 
         # Filter by constraints
         if len(sequences) > self.max_num_seqs:
@@ -97,13 +157,14 @@ class BAliBASELoader:
         if any(len(s) > self.max_seq_len for s in sequences):
             return None
 
-        # Determine ref_class from path
-        ref_class = "unknown"
-        for part in tfa_path.parts:
-            for rc in ["RV11", "RV12", "RV20", "RV30", "RV40", "RV50"]:
-                if rc in part:
-                    ref_class = rc
-                    break
+        # Determine ref_class from path or filename
+        ref_class = self._stem_to_class(tfa_path.stem)
+        if ref_class == "unknown":
+            for part in tfa_path.parts:
+                for rc in ["RV11", "RV12", "RV20", "RV30", "RV40", "RV50"]:
+                    if rc in part.upper():
+                        ref_class = rc
+                        break
 
         group_id = f"{ref_class}/{tfa_path.stem}"
 
