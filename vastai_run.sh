@@ -185,7 +185,7 @@ python -m model.train \
     --cache_dir data/cache \
     --checkpoint_dir checkpoints \
     --results_dir results/training \
-    --epochs_pretrain 20 \
+    --epochs_pretrain 5 \
     --epochs_finetune 0 \
     --batch_size 512 \
     --num_workers 4 \
@@ -214,7 +214,7 @@ if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
         --results_dir results/training \
         --resume checkpoints/best_model.pt \
         --epochs_pretrain 0 \
-        --epochs_finetune 10 \
+        --epochs_finetune 5 \
         --lr 1e-4 \
         --batch_size 128 \
         --num_workers 4 \
