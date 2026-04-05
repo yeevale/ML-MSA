@@ -1,0 +1,6 @@
+label,length,divergence,true_hw,t_full_ms,t_exact_ms,t_wide_ms,speedup_exact,speedup_wide
+short_similar,300,0.05,8,6.34,0.63,1.48,10.1,4.3
+medium_low,500,0.1,20,16.2,2.12,3.67,7.6,4.4
+medium,1000,0.15,50,39.03,5.37,8.95,7.3,4.4
+long_high,2000,0.2,120,206.83,62.74,82.49,3.3,2.5
+verylong_low,5000,0.1,80,1338.4,80.26,97.32,16.7,13.8

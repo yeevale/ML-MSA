@@ -1,0 +1,291 @@
+# scoring/metrics.py — Standard MSA quality metrics (BAliBASE benchmark).
+# SP-score and TC-score computed against reference alignment.
+# sp_score_internal — for iterative refinement (no reference needed).
+# benchmark() — run aligner on dataset, measure SP, TC, time, memory.
+
+import numpy as np
+import time
+import tracemalloc
+from collections import defaultdict
+
+
+def _build_residue_map(msa: list[str]) -> list[dict[int, int]]:
+    """For each sequence in MSA, build mapping:
+    column_index → residue_index (skipping gaps).
+    Returns list of dicts, one per sequence."""
+    maps = []
+    for seq in msa:
+        m = {}
+        res_idx = 0
+        for col, ch in enumerate(seq):
+            if ch != '-':
+                m[col] = res_idx
+                res_idx += 1
+        maps.append(m)
+    return maps
+
+
+def sp_score(predicted_msa: list[str],
+             reference_msa: list[str]) -> float:
+    """Sum-of-Pairs score (BAliBASE standard).
+    For each pair (i,j) and each column k in reference:
+      If both reference[i][k] and reference[j][k] are non-gap:
+        Map to residue indices, check if predicted aligns them identically.
+    SP = correct_pairs / total_pairs_in_reference."""
+    n = len(reference_msa)
+    if n < 2:
+        return 1.0
+
+    ref_maps = _build_residue_map(reference_msa)
+    pred_maps = _build_residue_map(predicted_msa)
+
+    # Build reverse maps for predicted: (seq_idx, residue_idx) → column
+    pred_reverse: list[dict[int, int]] = []
+    for seq_idx in range(n):
+        rev = {}
+        for col, res in pred_maps[seq_idx].items():
+            rev[res] = col
+        pred_reverse.append(rev)
+
+    correct = 0
+    total = 0
+    L_ref = len(reference_msa[0])
+
+    for k in range(L_ref):
+        for i in range(n):
+            if reference_msa[i][k] == '-':
+                continue
+            ri_i = ref_maps[i].get(k)
+            if ri_i is None:
+                continue
+            for j in range(i + 1, n):
+                if reference_msa[j][k] == '-':
+                    continue
+                ri_j = ref_maps[j].get(k)
+                if ri_j is None:
+                    continue
+
+                total += 1
+                # Check if residue ri_i of seq i and ri_j of seq j
+                # are in the same column in predicted
+                pred_col_i = pred_reverse[i].get(ri_i)
+                pred_col_j = pred_reverse[j].get(ri_j)
+                if pred_col_i is not None and pred_col_j is not None:
+                    if pred_col_i == pred_col_j:
+                        correct += 1
+
+    return correct / max(total, 1)
+
+
+def tc_score(predicted_msa: list[str],
+             reference_msa: list[str]) -> float:
+    """Total Column score.
+    For each column k in reference: extract non-gap residue indices for all seqs.
+    Check if predicted has the exact same set of residues in one column.
+    TC = matching_columns / total_reference_columns_with_nongap."""
+    n = len(reference_msa)
+    if n < 2:
+        return 1.0
+
+    ref_maps = _build_residue_map(reference_msa)
+    pred_maps = _build_residue_map(predicted_msa)
+
+    # For predicted: build (seq_idx, residue_idx) → column
+    pred_reverse: list[dict[int, int]] = []
+    for seq_idx in range(n):
+        rev = {}
+        for col, res in pred_maps[seq_idx].items():
+            rev[res] = col
+        pred_reverse.append(rev)
+
+    L_ref = len(reference_msa[0])
+    matching = 0
+    total = 0
+
+    for k in range(L_ref):
+        # Get all non-gap residue indices for this column
+        residues: list[tuple[int, int]] = []  # (seq_idx, residue_idx)
+        for i in range(n):
+            if reference_msa[i][k] != '-':
+                ri = ref_maps[i].get(k)
+                if ri is not None:
+                    residues.append((i, ri))
+
+        if len(residues) < 2:
+            continue
+
+        total += 1
+
+        # Check: are all these residues in the same predicted column?
+        pred_cols = set()
+        all_found = True
+        for seq_idx, res_idx in residues:
+            pc = pred_reverse[seq_idx].get(res_idx)
+            if pc is None:
+                all_found = False
+                break
+            pred_cols.add(pc)
+
+        if all_found and len(pred_cols) == 1:
+            matching += 1
+
+    return matching / max(total, 1)
+
+
+def sp_score_internal(msa: list[str], seq_type: str = "dna") -> float:
+    """SP-score without reference — for iterative refinement.
+    Sum of match scores over all pairwise non-gap positions.
+    Normalised by number of pairs × alignment length."""
+    n = len(msa)
+    if n < 2:
+        return 0.0
+    L = len(msa[0])
+    total = 0.0
+    count = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(L):
+                ci = msa[i][k]
+                cj = msa[j][k]
+                if ci != '-' and cj != '-':
+                    total += (1.0 if ci.upper() == cj.upper() else -1.0)
+                    count += 1
+    return total / max(count, 1)
+
+
+def profile_consensus(profile: np.ndarray, seq_type: str = "dna") -> str:
+    """Consensus string from profile: argmax symbol at each column.
+    If argmax is gap symbol → '-'."""
+    DNA_ALPHA = "ACGT-"
+    PROTEIN_ALPHA = "ACDEFGHIKLMNPQRSTVWY-"
+    alpha = DNA_ALPHA if seq_type == "dna" else PROTEIN_ALPHA
+    result: list[str] = []
+    for i in range(profile.shape[0]):
+        idx = int(np.argmax(profile[i]))
+        result.append(alpha[idx])
+    return "".join(result)
+
+
+def benchmark(aligner_func,
+              dataset: list[dict],
+              measure_memory: bool = True) -> dict:
+    """Run aligner_func on all examples and measure metrics.
+    aligner_func(sequences: list[str], seq_ids: list[str]) → list[str]
+    Returns dict with mean±std of each metric, grouped by ref_class.
+
+    dataset entries must have keys:
+      sequences, seq_ids, reference, ref_class, group_id
+    """
+    results: list[dict] = []
+
+    for group in dataset:
+        seqs = group["sequences"]
+        ids = group["seq_ids"]
+        ref = group["reference"]
+        ref_class = group["ref_class"]
+
+        if measure_memory:
+            tracemalloc.start()
+
+        t0 = time.perf_counter()
+        try:
+            predicted = aligner_func(seqs, ids)
+        except Exception as e:
+            results.append({
+                "group_id": group["group_id"],
+                "ref_class": ref_class,
+                "sp_score": 0.0,
+                "tc_score": 0.0,
+                "time_s": 0.0,
+                "peak_mb": 0.0,
+                "error": str(e),
+            })
+            if measure_memory:
+                tracemalloc.stop()
+            continue
+
+        elapsed = time.perf_counter() - t0
+
+        peak_mb = 0.0
+        if measure_memory:
+            _, peak = tracemalloc.get_traced_memory()
+            peak_mb = peak / (1024 * 1024)
+            tracemalloc.stop()
+
+        sp = sp_score(predicted, ref)
+        tc = tc_score(predicted, ref)
+
+        results.append({
+            "group_id": group["group_id"],
+            "ref_class": ref_class,
+            "sp_score": sp,
+            "tc_score": tc,
+            "time_s": elapsed,
+            "peak_mb": peak_mb,
+        })
+
+    # Aggregate by ref_class
+    by_class = defaultdict(list)
+    for r in results:
+        by_class[r["ref_class"]].append(r)
+
+    summary: dict = {"per_group": results, "by_class": {}}
+    for cls, group_results in sorted(by_class.items()):
+        sps = [r["sp_score"] for r in group_results]
+        tcs = [r["tc_score"] for r in group_results]
+        times = [r["time_s"] for r in group_results]
+        mems = [r["peak_mb"] for r in group_results]
+        summary["by_class"][cls] = {
+            "sp_mean": float(np.mean(sps)),
+            "sp_std": float(np.std(sps)),
+            "tc_mean": float(np.mean(tcs)),
+            "tc_std": float(np.std(tcs)),
+            "time_mean": float(np.mean(times)),
+            "time_std": float(np.std(times)),
+            "mem_mean": float(np.mean(mems)),
+            "n": len(group_results),
+        }
+
+    # Overall
+    all_sp = [r["sp_score"] for r in results]
+    all_tc = [r["tc_score"] for r in results]
+    all_t = [r["time_s"] for r in results]
+    summary["overall"] = {
+        "sp_mean": float(np.mean(all_sp)),
+        "sp_std": float(np.std(all_sp)),
+        "tc_mean": float(np.mean(all_tc)),
+        "tc_std": float(np.std(all_tc)),
+        "time_mean": float(np.mean(all_t)),
+        "n": len(results),
+    }
+
+    return summary
+
+
+if __name__ == "__main__":
+    # Smoke test
+    ref = ["ACGT", "AC-T", "A-GT"]
+    pred = ["ACGT", "AC-T", "A-GT"]
+    sp = sp_score(pred, ref)
+    tc = tc_score(pred, ref)
+    print(f"Perfect match: SP={sp:.4f}, TC={tc:.4f}")
+    assert sp == 1.0
+    assert tc == 1.0
+
+    # Imperfect
+    pred2 = ["ACGT", "ACT-", "AG-T"]
+    sp2 = sp_score(pred2, ref)
+    tc2 = tc_score(pred2, ref)
+    print(f"Imperfect: SP={sp2:.4f}, TC={tc2:.4f}")
+
+    # Internal SP
+    si = sp_score_internal(ref)
+    print(f"Internal SP: {si:.4f}")
+
+    # Consensus
+    from msa.progressive_msa import build_profile
+    profile = build_profile(ref, "dna")
+    cons = profile_consensus(profile, "dna")
+    print(f"Consensus: '{cons}'")
+
+    print("Smoke test passed!")
