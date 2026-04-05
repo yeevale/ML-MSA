@@ -334,6 +334,15 @@ def train(config: dict) -> None:
 
     model = BandPredictor().to(device)
 
+    # Resume from checkpoint if requested
+    resume_path = config.get("resume")
+    if resume_path and Path(resume_path).exists():
+        print(f"Resuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        state = ckpt.get("model_state", ckpt)  # handle both formats
+        model.load_state_dict(state)
+        print("Loaded model weights from checkpoint")
+
     # GPU optimizations
     if device != "cpu":
         torch.backends.cudnn.benchmark = True
@@ -348,13 +357,14 @@ def train(config: dict) -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs_pre + epochs_ft)
 
+    best_val_loss = float("inf")
     best_recall = -1.0
     wait = 0
     history_epochs = []  # collect per-epoch metrics for training_history.json
     best_epoch_metrics = {}
 
     def run_stage(n_epochs: int, stage_name: str, start_epoch: int) -> int:
-        nonlocal best_recall, wait, best_epoch_metrics
+        nonlocal best_val_loss, best_recall, wait, best_epoch_metrics
         for ep in range(n_epochs):
             epoch = start_epoch + ep
             train_metrics = train_epoch(model, train_loader, optimizer,
@@ -374,9 +384,12 @@ def train(config: dict) -> None:
             epoch_record.update(val_metrics)
             history_epochs.append(epoch_record)
 
+            recall = val_metrics["band_recall@1.0x"]
+            val_loss = val_metrics["loss"]
             print(f"[{stage_name}] Epoch {epoch}: "
                   f"train_loss={train_metrics['loss']:.4f} "
-                  f"val_recall@1x={val_metrics['band_recall@1.0x']:.4f} "
+                  f"val_loss={val_loss:.4f} "
+                  f"val_recall@1x={recall:.4f} "
                   f"val_mae={val_metrics['mae_centre']:.2f}")
 
             if use_wandb:
@@ -392,9 +405,10 @@ def train(config: dict) -> None:
                     "config": config,
                 }, ckpt_dir / f"checkpoint_epoch{epoch}.pt")
 
-            # Best model
-            recall = val_metrics["band_recall@1.0x"]
-            if recall > best_recall:
+            # Best model — use val_loss for early stopping (stable & monotonic)
+            # recall@1x is noisy because it rewards width overestimation
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 best_recall = recall
                 wait = 0
                 best_epoch_metrics = {"epoch": epoch, **val_metrics}
@@ -404,7 +418,8 @@ def train(config: dict) -> None:
                     "config": config,
                     "val_metrics": val_metrics,
                 }, ckpt_dir / "best_model.pt")
-                print(f"  → New best recall@1x: {best_recall:.4f}")
+                print(f"  → New best val_loss: {best_val_loss:.4f} "
+                      f"(recall@1x: {recall:.4f})")
             else:
                 wait += 1
                 if wait >= patience:
@@ -468,7 +483,8 @@ def train(config: dict) -> None:
         json.dump(history, f, indent=2, default=str)
     print(f"Training history saved to: {history_path}")
 
-    print(f"\nTraining complete. Best recall@1x: {best_recall:.4f}")
+    print(f"\nTraining complete. Best val_loss: {best_val_loss:.4f}, "
+          f"recall@1x: {best_recall:.4f}")
     print(f"Best model saved to: {ckpt_dir / 'best_model.pt'}")
 
 
@@ -491,6 +507,8 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--resume", default=None,
+                        help="Path to checkpoint to resume from")
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_run_name", default=None)
     args = parser.parse_args()

@@ -17,7 +17,7 @@ import pytest
 import aligner
 from model.evaluate import BandPredictorInference
 
-CHECKPOINT = "checkpoints/best_model.pt"
+CHECKPOINT = "checkpoints/best.pt"
 
 
 @pytest.fixture(scope="module")

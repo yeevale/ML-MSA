@@ -102,40 +102,6 @@ else:
 "
 TRAIN_PARQUET="data/processed/train_combined.parquet"
 
-# Generate validation data if missing
-if [ ! -f "data/processed/val.parquet" ]; then
-    echo "Generating validation data (10k DNA + 2k protein)..."
-    python -m data.simulate \
-        --n_samples 10000 \
-        --seq_type dna \
-        --output data/processed/val_dna.parquet \
-        --n_workers $(nproc) \
-        --seed 789 \
-        2>&1 | tee logs/data_gen_val.log
-
-    python -m data.simulate \
-        --n_samples 2000 \
-        --seq_type protein \
-        --output data/processed/val_protein.parquet \
-        --n_workers $(nproc) \
-        --seed 790 \
-        2>&1 | tee -a logs/data_gen_val.log
-
-    python -c "
-import pandas as pd, os
-dfs = []
-for f in ['data/processed/val_dna.parquet', 'data/processed/val_protein.parquet']:
-    if os.path.exists(f):
-        dfs.append(pd.read_parquet(f))
-combined = pd.concat(dfs, ignore_index=True)
-combined.to_parquet('data/processed/val.parquet', index=False)
-print(f'Validation set: {len(combined)} samples')
-for f in ['data/processed/val_dna.parquet', 'data/processed/val_protein.parquet']:
-    if os.path.exists(f):
-        os.remove(f)
-"
-fi
-
 echo "Data generation complete."
 
 # --------------------------------------------------------------------------
@@ -225,7 +191,7 @@ python -m model.train \
     --num_workers 4 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
-    --patience 5 \
+    --patience 10 \
     --device cuda \
     2>&1 | tee logs/training_stage1.log
 
@@ -252,7 +218,7 @@ if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
         --lr 1e-4 \
         --batch_size 128 \
         --num_workers 4 \
-        --patience 5 \
+        --patience 10 \
         --device cuda \
         2>&1 | tee logs/training_stage2.log
 
@@ -289,37 +255,9 @@ echo "Experiments complete: $(date)"
 echo ""
 echo "=== STEP 6: Full Test Suite ==="
 
-pip install --quiet pytest-json-report 2>/dev/null || true
-
 python -m pytest tests/ \
     -v --tb=short \
-    --json-report --json-report-file=results/tests/full_test_report.json \
     2>&1 | tee logs/test_full.log
-
-# Fallback: if pytest-json-report is not available, generate basic report
-if [ ! -f "results/tests/full_test_report.json" ]; then
-    python -c "
-import json, subprocess, re
-output = open('logs/test_full.log').read()
-# Parse basic summary from pytest output
-passed = len(re.findall(r'PASSED', output))
-failed = len(re.findall(r'FAILED', output))
-skipped = len(re.findall(r'SKIPPED', output))
-total = passed + failed + skipped
-report = {
-    'summary': {
-        'total': total,
-        'passed': passed,
-        'failed': failed,
-        'skipped': skipped,
-        'duration': 0,
-    }
-}
-with open('results/tests/full_test_report.json', 'w') as f:
-    json.dump(report, f, indent=2)
-print(f'Generated test report: {total} total, {passed} passed, {failed} failed, {skipped} skipped')
-"
-fi
 
 # --------------------------------------------------------------------------
 # STEP 7: Generate Final Report
