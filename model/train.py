@@ -252,6 +252,7 @@ def train(config: dict) -> None:
     epochs_pre = config.get("epochs_pretrain", 20)
     epochs_ft = config.get("epochs_finetune", 10)
     batch_size = config.get("batch_size", 128)
+    num_workers = config.get("num_workers", min(8, os.cpu_count() or 1))
     lr = config.get("lr", 1e-3)
     wd = config.get("weight_decay", 1e-4)
     lam = config.get("lam", 2.0)
@@ -289,13 +290,25 @@ def train(config: dict) -> None:
     sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size,
-                              sampler=sampler, num_workers=0,
-                              pin_memory=(device != "cpu"))
+                              sampler=sampler, num_workers=num_workers,
+                              pin_memory=(device != "cpu"),
+                              persistent_workers=(num_workers > 0))
     val_loader = DataLoader(val_ds, batch_size=batch_size,
-                            shuffle=False, num_workers=0,
-                            pin_memory=(device != "cpu"))
+                            shuffle=False, num_workers=num_workers,
+                            pin_memory=(device != "cpu"),
+                            persistent_workers=(num_workers > 0))
 
     model = BandPredictor().to(device)
+
+    # GPU optimizations
+    if device != "cpu":
+        torch.backends.cudnn.benchmark = True
+        try:
+            model = torch.compile(model)
+            print("torch.compile enabled")
+        except Exception:
+            pass  # torch.compile not available in older PyTorch
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs_pre + epochs_ft)
@@ -379,8 +392,9 @@ def train(config: dict) -> None:
             combined_weights, len(combined_weights), replacement=True)
 
         train_loader = DataLoader(combined_ds, batch_size=batch_size,
-                                  sampler=combined_sampler, num_workers=0,
-                                  pin_memory=(device != "cpu"))
+                                  sampler=combined_sampler, num_workers=num_workers,
+                                  pin_memory=(device != "cpu"),
+                                  persistent_workers=(num_workers > 0))
 
         # Lower LR for finetuning
         for pg in optimizer.param_groups:
@@ -415,6 +429,7 @@ if __name__ == "__main__":
     parser.add_argument("--lam", type=float, default=2.0)
     parser.add_argument("--penalty", type=float, default=5.0)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_run_name", default=None)

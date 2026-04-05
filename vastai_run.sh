@@ -122,7 +122,8 @@ python -m model.train \
     --checkpoint_dir checkpoints \
     --epochs_pretrain 20 \
     --epochs_finetune 0 \
-    --batch_size 256 \
+    --batch_size 1024 \
+    --num_workers 8 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
     --patience 5 \
