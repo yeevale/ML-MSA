@@ -130,6 +130,41 @@ def sp_score(predicted_msa: list[str],
         if n < 2:
             return 1.0
 
+        # --- DIAGNOSTIC OUTPUT (Problem 1) ---
+        pred_ungapped = [''.join(c for c in s if c != '-') for s in predicted_msa]
+        ref_ungapped  = [''.join(c for c in s if c != '-') for s in reference_msa]
+
+        if len(predicted_msa) != len(reference_msa):
+            print(f"[SP DIAG] seq count mismatch: pred={len(predicted_msa)}, ref={len(reference_msa)}")
+
+        # Check how many ref sequences can be found in pred by ungapped content
+        matched_count = 0
+        unmatched_refs = []
+        used = set()
+        for ri, rseq in enumerate(ref_ungapped):
+            found = False
+            for pi, pseq in enumerate(pred_ungapped):
+                if pi not in used and rseq == pseq:
+                    used.add(pi)
+                    found = True
+                    break
+            if found:
+                matched_count += 1
+            else:
+                unmatched_refs.append(ri)
+
+        if matched_count < n:
+            print(f"[SP DIAG] Only {matched_count}/{n} ref seqs matched in pred by ungapped content")
+            for ri in unmatched_refs[:3]:
+                print(f"  ref[{ri}] ungapped len={len(ref_ungapped[ri])}, first 60: {ref_ungapped[ri][:60]}")
+                # Find closest pred seq by length
+                closest = min(range(len(pred_ungapped)),
+                              key=lambda pi: abs(len(pred_ungapped[pi]) - len(ref_ungapped[ri])))
+                print(f"  closest pred[{closest}] ungapped len={len(pred_ungapped[closest])}, first 60: {pred_ungapped[closest][:60]}")
+            print(f"  pred ungapped lengths: {sorted(set(len(s) for s in pred_ungapped))}")
+            print(f"  ref  ungapped lengths: {sorted(set(len(s) for s in ref_ungapped))}")
+        # --- END DIAGNOSTIC ---
+
         # Fix 2: match sequences (handles different counts and reordering)
         result = _match_and_reorder(predicted_msa, reference_msa)
         if result is None:

@@ -367,6 +367,15 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
                          and all(len(s) == len(ref[0]) for s in ref)
                          and any('-' in s for s in ref))  # must have gaps
             if ref_valid and len(ref) == len(msa_result):
+                # --- DIAGNOSTIC (Problem 1) ---
+                ref_ug = [s.replace('-', '').upper() for s in ref]
+                pred_ug = [s.replace('-', '').upper() for s in msa_result]
+                n_match = sum(1 for r in ref_ug if r in pred_ug)
+                if n_match < len(ref):
+                    print(f"  [MEASURE DIAG] ref has {len(ref)} seqs, only {n_match} found in pred")
+                    print(f"    ref  ungapped lens: {[len(s) for s in ref_ug[:5]]}")
+                    print(f"    pred ungapped lens: {[len(s) for s in pred_ug[:5]]}")
+                # --- END DIAGNOSTIC ---
                 sp = sp_score(msa_result, ref)
                 tc = tc_score(msa_result, ref)
             else:
