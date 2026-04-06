@@ -30,7 +30,7 @@ def predictor():
 
 def generate_test_pairs(n: int = 100, seed: int = 0
                         ) -> list[tuple[str, str, float]]:
-    """Generate test pairs at various divergence levels."""
+    """Generate test pairs at various divergence levels with indels."""
     rng = np.random.default_rng(seed)
     pairs: list[tuple[str, str, float]] = []
     for div in [0.05, 0.10, 0.20, 0.30]:
@@ -43,7 +43,23 @@ def generate_test_pairs(n: int = 100, seed: int = 0
             for p in positions:
                 choices = [c for c in "ACGT" if c != seq2[p]]
                 seq2[p] = rng.choice(choices)
-            pairs.append((seq1, "".join(seq2), div))
+            # Add indels (insertions and deletions) to shift path off diagonal
+            seq2_str = "".join(seq2)
+            n_indels = max(1, int(length * div * 0.3))
+            chars = list(seq2_str)
+            for _ in range(n_indels):
+                pos = int(rng.integers(0, max(len(chars), 1)))
+                if rng.random() < 0.5 and len(chars) > 10:
+                    # deletion
+                    del_len = int(rng.integers(1, 4))
+                    chars[pos:pos + del_len] = []
+                else:
+                    # insertion
+                    ins_len = int(rng.integers(1, 4))
+                    ins = list(rng.choice(list("ACGT"), ins_len))
+                    chars[pos:pos] = ins
+            seq2_str = "".join(chars)
+            pairs.append((seq1, seq2_str, div))
     return pairs
 
 
