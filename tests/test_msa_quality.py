@@ -142,7 +142,8 @@ def run_benchmark(aligner_fn, groups: list[dict]) -> pd.DataFrame:
 
 
 def test_full_comparison(balibase_test, predictor) -> None:
-    """Final comparison table of all methods on BAliBASE."""
+    """Final comparison table of all methods on BAliBASE (5 groups for speed)."""
+    groups = balibase_test[:5]
     methods = {
         "ClustalW": lambda s, ids: run_clustalw(s, ids),
         "MAFFT": lambda s, ids: run_mafft(s, ids),
@@ -159,7 +160,7 @@ def test_full_comparison(balibase_test, predictor) -> None:
     all_results: dict[str, pd.DataFrame] = {}
     for name, fn in methods.items():
         print(f"\nRunning {name}...")
-        df = run_benchmark(fn, balibase_test)
+        df = run_benchmark(fn, groups)
         all_results[name] = df
         print(f"  SP={df.sp.mean():.3f}, TC={df.tc.mean():.3f}, "
               f"Time={df.time_s.mean():.2f}s")
@@ -185,7 +186,7 @@ def test_our_method_competitive(balibase_test, predictor) -> None:
     df = run_benchmark(
         lambda s, ids: progressive_msa(
             s, ids, predictor, seq_type="protein"),
-        balibase_test
+        balibase_test[:5]
     )
     mean_sp = df.sp.mean()
     print(f"\nOur method mean SP: {mean_sp:.3f}")

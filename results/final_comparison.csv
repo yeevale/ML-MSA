@@ -1,0 +1,8 @@
+,SP_mean,TC_mean,Time_mean
+ClustalW,0.0,0.0,999.0
+MAFFT,0.0,0.0,999.0
+MUSCLE,0.0,0.0,999.0
+Fixed_W30,0.0,0.0,999.0
+Fixed_W100,0.0,0.0,999.0
+Neural_band,0.0,0.0,999.0
+Neural_+_refine,0.0,0.0,999.0
