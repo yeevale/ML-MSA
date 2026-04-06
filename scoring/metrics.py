@@ -25,15 +25,76 @@ def _build_residue_map(msa: list[str]) -> list[dict[int, int]]:
     return maps
 
 
+def _match_sequences(predicted_msa: list[str],
+                     reference_msa: list[str]) -> list[str] | None:
+    """Reorder predicted_msa to match reference_msa sequence order.
+    Matches by ungapped sequence content (case-insensitive).
+    Returns reordered predicted_msa or None if matching fails."""
+    if len(predicted_msa) != len(reference_msa):
+        return None
+
+    pred_ungapped = [s.replace('-', '').upper() for s in predicted_msa]
+    ref_ungapped = [s.replace('-', '').upper() for s in reference_msa]
+
+    reordered: list[str | None] = [None] * len(reference_msa)
+    used = [False] * len(predicted_msa)
+
+    for i, ref_seq in enumerate(ref_ungapped):
+        for j, pred_seq in enumerate(pred_ungapped):
+            if not used[j] and pred_seq == ref_seq:
+                reordered[i] = predicted_msa[j]
+                used[j] = True
+                break
+
+    if any(r is None for r in reordered):
+        return None
+    return reordered
+
+
+def debug_sp(predicted_msa: list[str], reference_msa: list[str],
+             label: str = "") -> None:
+    """Print diagnostic info for SP-score debugging."""
+    print(f"[SP DEBUG {label}]")
+    print(f"  pred seqs: {len(predicted_msa)}, "
+          f"cols: {len(predicted_msa[0]) if predicted_msa else 0}")
+    print(f"  ref  seqs: {len(reference_msa)}, "
+          f"cols: {len(reference_msa[0]) if reference_msa else 0}")
+    print(f"  pred[0][:80]: {predicted_msa[0][:80] if predicted_msa else 'EMPTY'}")
+    print(f"  ref[0][:80]:  {reference_msa[0][:80] if reference_msa else 'EMPTY'}")
+    gaps_pred = [s.count('-') for s in predicted_msa]
+    gaps_ref = [s.count('-') for s in reference_msa]
+    print(f"  gaps in pred: {gaps_pred[:5]}")
+    print(f"  gaps in ref:  {gaps_ref[:5]}")
+    # Check sequence matching
+    pred_ug = [s.replace('-', '').upper() for s in predicted_msa]
+    ref_ug = [s.replace('-', '').upper() for s in reference_msa]
+    order_match = all(p == r for p, r in zip(pred_ug, ref_ug))
+    print(f"  sequence order match: {order_match}")
+    if not order_match:
+        matched = _match_sequences(predicted_msa, reference_msa)
+        print(f"  reorder possible: {matched is not None}")
+
+
 def sp_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
-    """Sum-of-Pairs score (BAliBASE standard)."""
+    """Sum-of-Pairs score (BAliBASE standard).
+    Handles sequence order mismatch by matching ungapped content."""
     n = len(reference_msa)
     if n < 2:
         return 1.0
-    # Validate lengths
     if len(predicted_msa) != n:
         return 0.0
+
+    # Match sequence order by ungapped content
+    pred_ungapped = [s.replace('-', '').upper() for s in predicted_msa]
+    ref_ungapped = [s.replace('-', '').upper() for s in reference_msa]
+    if any(p != r for p, r in zip(pred_ungapped, ref_ungapped)):
+        matched = _match_sequences(predicted_msa, reference_msa)
+        if matched is None:
+            return 0.0
+        predicted_msa = matched
+
+    # Validate internal consistency (all seqs same length within each MSA)
     if any(len(s) != len(reference_msa[0]) for s in reference_msa):
         return 0.0
     if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
@@ -42,7 +103,7 @@ def sp_score(predicted_msa: list[str],
     ref_maps = _build_residue_map(reference_msa)
     pred_maps = _build_residue_map(predicted_msa)
 
-    # Build reverse maps for predicted: (seq_idx, residue_idx) → column
+    # Build reverse maps for predicted: residue_idx → column
     pred_reverse: list[dict[int, int]] = []
     for seq_idx in range(n):
         rev = {}
@@ -69,8 +130,6 @@ def sp_score(predicted_msa: list[str],
                     continue
 
                 total += 1
-                # Check if residue ri_i of seq i and ri_j of seq j
-                # are in the same column in predicted
                 pred_col_i = pred_reverse[i].get(ri_i)
                 pred_col_j = pred_reverse[j].get(ri_j)
                 if pred_col_i is not None and pred_col_j is not None:
@@ -82,13 +141,24 @@ def sp_score(predicted_msa: list[str],
 
 def tc_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
-    """Total Column score."""
+    """Total Column score.
+    Handles sequence order mismatch by matching ungapped content."""
     n = len(reference_msa)
     if n < 2:
         return 1.0
-    # Validate lengths
     if len(predicted_msa) != n:
         return 0.0
+
+    # Match sequence order by ungapped content
+    pred_ungapped = [s.replace('-', '').upper() for s in predicted_msa]
+    ref_ungapped = [s.replace('-', '').upper() for s in reference_msa]
+    if any(p != r for p, r in zip(pred_ungapped, ref_ungapped)):
+        matched = _match_sequences(predicted_msa, reference_msa)
+        if matched is None:
+            return 0.0
+        predicted_msa = matched
+
+    # Validate internal consistency
     if any(len(s) != len(reference_msa[0]) for s in reference_msa):
         return 0.0
     if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
@@ -270,24 +340,34 @@ def benchmark(aligner_func,
 
 
 if __name__ == "__main__":
-    # Smoke test
-    ref = ["ACGT", "AC-T", "A-GT"]
-    pred = ["ACGT", "AC-T", "A-GT"]
-    sp = sp_score(pred, ref)
-    tc = tc_score(pred, ref)
-    print(f"Perfect match: SP={sp:.4f}, TC={tc:.4f}")
-    assert sp == 1.0
-    assert tc == 1.0
+    # Test 1: Perfect alignment
+    ref = ["ACGT--ACGT", "ACGT--ACGT", "--ACGTACGT"]
+    pred = ["ACGT--ACGT", "ACGT--ACGT", "--ACGTACGT"]
+    score = sp_score(pred, ref)
+    assert score == 1.0, f"Perfect alignment should score 1.0, got {score}"
 
-    # Imperfect
-    pred2 = ["ACGT", "ACT-", "AG-T"]
-    sp2 = sp_score(pred2, ref)
-    tc2 = tc_score(pred2, ref)
-    print(f"Imperfect: SP={sp2:.4f}, TC={tc2:.4f}")
+    # Test 2: Imperfect alignment
+    pred_wrong = ["ACGTACACGT", "ACGT--ACGT", "--ACGTACGT"]
+    score2 = sp_score(pred_wrong, ref)
+    assert 0.0 <= score2 <= 1.0, f"Imperfect alignment should score between 0 and 1, got {score2}"
+    print(f"sp_score tests passed: perfect={score:.3f}, imperfect={score2:.3f}")
+
+    # Test 3: Sequence order mismatch
+    ref3 = ["ACGT--ACGT", "--ACGTACGT", "ACGT--ACGT"]
+    pred3_reordered = ["--ACGTACGT", "ACGT--ACGT", "ACGT--ACGT"]  # different order
+    score3 = sp_score(pred3_reordered, ref3)
+    assert score3 == 1.0, f"Reordered perfect alignment should score 1.0, got {score3}"
+    print(f"Reordered SP: {score3:.3f}")
+
+    # Test 4: TC score
+    tc = tc_score(pred, ref)
+    assert tc == 1.0, f"Perfect TC should be 1.0, got {tc}"
+    print(f"TC score test passed: {tc:.3f}")
 
     # Internal SP
     si = sp_score_internal(ref)
     print(f"Internal SP: {si:.4f}")
+    print("All scoring tests passed!")
 
     # Consensus
     from msa.progressive_msa import build_profile

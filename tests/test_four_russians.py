@@ -102,6 +102,20 @@ def test_fr_correctness() -> None:
         )
 
 
+def test_identical_input_always_hits() -> None:
+    """Identical inputs must always hit the lookup table on second call."""
+    fr = aligner.FourRussiansAligner(0, False, -10.0, -0.5, 4)
+    seq1 = "ACGTACGTACGT" * 10
+    seq2 = "ACGTACGTACGT" * 10
+    fr.last_row(seq1, seq2, 0, 20)
+    fr.reset_stats()
+    fr.last_row(seq1, seq2, 0, 20)
+    stats = fr.get_stats()
+    assert stats.hit_ratio == 1.0, \
+        f"Identical inputs must hit cache 100%, got {stats.hit_ratio:.1%}"
+    print(f"FR cache test passed: hit_ratio={stats.hit_ratio:.1%}")
+
+
 if __name__ == "__main__":
     print("Smoke test: test_four_russians.py")
     fr = aligner.FourRussiansAligner(0, False, -10.0, -0.5, 16)

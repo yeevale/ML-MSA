@@ -90,60 +90,66 @@ public:
         int i = 0;
         while (i < n) {
             int block_rows = std::min(t, n - i);
-            
-            // For each row in the block
-            for (int bi = 0; bi < block_rows; ++bi) {
-                int row = i + bi + 1;
-                std::fill(curr_row.begin(), curr_row.end(), NEG_INF);
 
-                int jmin = band_j_min(row, centre_diag, half_width, m);
-                int jmax = band_j_max(row, centre_diag, half_width, m);
+            // Compute hash BEFORE processing — includes sequence chars + quantized boundary
+            size_t key = hash_block(seq1, seq2, i, std::min(i + t, n),
+                                    centre_diag, half_width, prev_row);
 
-                // First column gap
-                if (0 >= jmin && 0 <= jmax) {
-                    int bidx = to_band_idx(0, row, centre_diag, half_width);
-                    if (bidx >= 0 && bidx < bw + 2) {
-                        curr_row[bidx] = go_ + ge_ * row;
-                    }
-                }
-
-                for (int j = std::max(1, jmin); j <= jmax; ++j) {
-                    int bidx = to_band_idx(j, row, centre_diag, half_width);
-                    if (bidx < 0 || bidx >= bw + 2) continue;
-
-                    float s = score_chars(seq1[row - 1], seq2[j - 1]);
-
-                    // Diagonal from prev_row
-                    int bd = to_band_idx(j - 1, row - 1, centre_diag, half_width);
-                    float diag_val = NEG_INF;
-                    if (bd >= 0 && bd < bw + 2) diag_val = prev_row[bd];
-
-                    // Up from prev_row
-                    int bu = to_band_idx(j, row - 1, centre_diag, half_width);
-                    float up_val = NEG_INF;
-                    if (bu >= 0 && bu < bw + 2) up_val = prev_row[bu];
-
-                    // Left from curr_row
-                    int bl = to_band_idx(j - 1, row, centre_diag, half_width);
-                    float left_val = NEG_INF;
-                    if (bl >= 0 && bl < bw + 2) left_val = curr_row[bl];
-
-                    // Simple scoring (without separate affine tracking for speed)
-                    float from_diag = diag_val + s;
-                    float from_up = up_val + go_ + ge_;
-                    float from_left = left_val + go_ + ge_;
-
-                    curr_row[bidx] = std::max({from_diag, from_up, from_left});
-                }
-
-                prev_row = curr_row;
-            }
-            
-            // Try to cache this block
-            size_t key = hash_block_simple(seq1, seq2, i, std::min(i + t, n), centre_diag, half_width);
-            if (table_.find(key) != table_.end()) {
+            auto it = table_.find(key);
+            if (it != table_.end()) {
+                // Cache hit — use stored bottom boundary, skip DP computation
+                prev_row = it->second.bottom_row;
                 stats_.hits++;
             } else {
+                // Cache miss — compute block via DP
+                for (int bi = 0; bi < block_rows; ++bi) {
+                    int row = i + bi + 1;
+                    std::fill(curr_row.begin(), curr_row.end(), NEG_INF);
+
+                    int jmin = band_j_min(row, centre_diag, half_width, m);
+                    int jmax = band_j_max(row, centre_diag, half_width, m);
+
+                    // First column gap
+                    if (0 >= jmin && 0 <= jmax) {
+                        int bidx = to_band_idx(0, row, centre_diag, half_width);
+                        if (bidx >= 0 && bidx < bw + 2) {
+                            curr_row[bidx] = go_ + ge_ * row;
+                        }
+                    }
+
+                    for (int j = std::max(1, jmin); j <= jmax; ++j) {
+                        int bidx = to_band_idx(j, row, centre_diag, half_width);
+                        if (bidx < 0 || bidx >= bw + 2) continue;
+
+                        float s = score_chars(seq1[row - 1], seq2[j - 1]);
+
+                        // Diagonal from prev_row
+                        int bd = to_band_idx(j - 1, row - 1, centre_diag, half_width);
+                        float diag_val = NEG_INF;
+                        if (bd >= 0 && bd < bw + 2) diag_val = prev_row[bd];
+
+                        // Up from prev_row
+                        int bu = to_band_idx(j, row - 1, centre_diag, half_width);
+                        float up_val = NEG_INF;
+                        if (bu >= 0 && bu < bw + 2) up_val = prev_row[bu];
+
+                        // Left from curr_row
+                        int bl = to_band_idx(j - 1, row, centre_diag, half_width);
+                        float left_val = NEG_INF;
+                        if (bl >= 0 && bl < bw + 2) left_val = curr_row[bl];
+
+                        // Simple scoring (without separate affine tracking for speed)
+                        float from_diag = diag_val + s;
+                        float from_up = up_val + go_ + ge_;
+                        float from_left = left_val + go_ + ge_;
+
+                        curr_row[bidx] = std::max({from_diag, from_up, from_left});
+                    }
+
+                    prev_row = curr_row;
+                }
+
+                // Store in cache
                 if (table_memory_bytes() < max_bytes_) {
                     BlockBoundary bb;
                     bb.bottom_row = prev_row;
@@ -281,18 +287,49 @@ private:
     size_t hash_block_simple(const std::string& s1, const std::string& s2,
                               int start_i, int end_i,
                               int centre_diag, int half_width) const {
-        // Simple hash combining sequence content and position
-        size_t h = std::hash<int>{}(centre_diag);
-        h ^= std::hash<int>{}(half_width) << 1;
-        h ^= std::hash<int>{}(start_i) << 2;
-        for (int i = start_i; i < end_i && i < (int)s1.size(); ++i)
-            h ^= std::hash<char>{}(s1[i]) << ((i - start_i + 3) % 16);
-        // Include relevant portion of s2
-        int jmin = band_j_min(start_i, centre_diag, half_width, (int)s2.size());
-        int jmax = band_j_max(end_i, centre_diag, half_width, (int)s2.size());
-        for (int j = std::max(0, jmin); j <= std::min((int)s2.size() - 1, jmax); ++j)
-            h ^= std::hash<char>{}(s2[j]) << ((j - jmin + 7) % 16);
+        // Legacy hash — not used by last_row() anymore
+        return hash_block(s1, s2, start_i, end_i, centre_diag, half_width, {});
+    }
+
+    size_t hash_block(const std::string& s1, const std::string& s2,
+                      int start_i, int end_i,
+                      int centre_diag, int half_width,
+                      const std::vector<float>& boundary_row) const {
+        // FNV-1a hash on: sequence chars + quantized boundary values
+        // NO position (start_i) — same content at different positions must match
+        size_t h = 14695981039346656037ULL;
+        constexpr size_t FNV_PRIME = 1099511628211ULL;
+
+        // Hash seq1 chars in this block
+        for (int idx = start_i; idx < end_i && idx < (int)s1.size(); ++idx) {
+            h ^= static_cast<size_t>(s1[idx]);
+            h *= FNV_PRIME;
+        }
+
+        // Hash relevant seq2 chars (band region)
+        int jmin = band_j_min(start_i + 1, centre_diag, half_width, (int)s2.size());
+        int jmax = band_j_max(std::min(end_i, (int)s1.size()),
+                              centre_diag, half_width, (int)s2.size());
+        for (int j = std::max(0, jmin);
+             j <= std::min((int)s2.size() - 1, jmax); ++j) {
+            h ^= static_cast<size_t>(s2[j]);
+            h *= FNV_PRIME;
+        }
+
+        // Hash quantized boundary values (top boundary of this block)
+        for (size_t k = 0; k < boundary_row.size(); ++k) {
+            int q = quantize_boundary(boundary_row[k]);
+            h ^= static_cast<size_t>(static_cast<unsigned int>(q + 100000));
+            h *= FNV_PRIME;
+        }
+
         return h;
+    }
+
+    int quantize_boundary(float val) const {
+        if (val <= NEG_INF + 1.0f) return -(B_ * 100);
+        float clamped = std::max(-1000.0f, std::min(1000.0f, val));
+        return static_cast<int>(std::round(clamped * B_ / 100.0f));
     }
 
     void update_hit_ratio() {
