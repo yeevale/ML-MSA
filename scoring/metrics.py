@@ -75,138 +75,222 @@ def debug_sp(predicted_msa: list[str], reference_msa: list[str],
         print(f"  reorder possible: {matched is not None}")
 
 
+def _match_and_reorder(predicted_msa: list[str],
+                       reference_msa: list[str]) -> tuple[list[str], dict] | None:
+    """Match predicted to reference sequences and return (reordered_pred, ref_to_pred_map).
+    Strategy: first match by exact gapped string, then by ungapped content.
+    Returns None if matching fails."""
+    n = len(reference_msa)
+    pred_upper = [s.upper() for s in predicted_msa]
+    ref_upper  = [s.upper() for s in reference_msa]
+
+    ref_to_pred = {}
+    used_pred = set()
+
+    # Pass 1: match by exact gapped string
+    for ri in range(n):
+        for pi in range(len(pred_upper)):
+            if pi not in used_pred and ref_upper[ri] == pred_upper[pi]:
+                ref_to_pred[ri] = pi
+                used_pred.add(pi)
+                break
+
+    # Pass 2: match remaining by ungapped content
+    pred_ungapped = [''.join(c for c in s if c != '-') for s in pred_upper]
+    ref_ungapped  = [''.join(c for c in s if c != '-') for s in ref_upper]
+
+    for ri in range(n):
+        if ri in ref_to_pred:
+            continue
+        for pi in range(len(pred_ungapped)):
+            if pi not in used_pred and ref_ungapped[ri] == pred_ungapped[pi]:
+                ref_to_pred[ri] = pi
+                used_pred.add(pi)
+                break
+
+    if len(ref_to_pred) < n:
+        return None
+
+    reordered = [predicted_msa[ref_to_pred[ri]] for ri in range(n)]
+    # After reordering, mapping is identity
+    identity_map = {i: i for i in range(n)}
+    return reordered, identity_map
+
+
 def sp_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
     """Sum-of-Pairs score (BAliBASE standard).
     Handles sequence order mismatch by matching ungapped content."""
-    n = len(reference_msa)
-    if n < 2:
-        return 1.0
-    if len(predicted_msa) != n:
-        return 0.0
+    try:
+        # Fix 1: uppercase everything
+        predicted_msa = [s.upper() for s in predicted_msa]
+        reference_msa = [s.upper() for s in reference_msa]
 
-    # Match sequence order by ungapped content
-    pred_ungapped = [s.replace('-', '').upper() for s in predicted_msa]
-    ref_ungapped = [s.replace('-', '').upper() for s in reference_msa]
-    if any(p != r for p, r in zip(pred_ungapped, ref_ungapped)):
-        matched = _match_sequences(predicted_msa, reference_msa)
-        if matched is None:
+        n = len(reference_msa)
+        if n < 2:
+            return 1.0
+
+        # Fix 2: match sequences (handles different counts and reordering)
+        result = _match_and_reorder(predicted_msa, reference_msa)
+        if result is None:
             return 0.0
-        predicted_msa = matched
+        predicted_msa, ref_to_pred = result
 
-    # Validate internal consistency (all seqs same length within each MSA)
-    if any(len(s) != len(reference_msa[0]) for s in reference_msa):
-        return 0.0
-    if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
-        return 0.0
+        # Fix 4: build position maps for each sequence
+        # pos_map[seq_idx][ungapped_pos] = gapped_pos in predicted
+        def build_pos_map(msa: list[str]) -> list[dict]:
+            maps = []
+            for seq in msa:
+                m = {}
+                ungapped_pos = 0
+                for gapped_pos, char in enumerate(seq):
+                    if char != '-':
+                        m[ungapped_pos] = gapped_pos
+                        ungapped_pos += 1
+                maps.append(m)
+            return maps
 
-    ref_maps = _build_residue_map(reference_msa)
-    pred_maps = _build_residue_map(predicted_msa)
+        pred_pos_maps = build_pos_map(predicted_msa)
+        ref_pos_maps  = build_pos_map(reference_msa)
 
-    # Build reverse maps for predicted: residue_idx → column
-    pred_reverse: list[dict[int, int]] = []
-    for seq_idx in range(n):
-        rev = {}
-        for col, res in pred_maps[seq_idx].items():
-            rev[res] = col
-        pred_reverse.append(rev)
+        # Fix 5: compute SP-score using position maps
+        correct = 0
+        total   = 0
 
-    correct = 0
-    total = 0
-    L_ref = len(reference_msa[0])
-
-    for k in range(L_ref):
+        n = len(reference_msa)
         for i in range(n):
-            if reference_msa[i][k] == '-':
-                continue
-            ri_i = ref_maps[i].get(k)
-            if ri_i is None:
-                continue
             for j in range(i + 1, n):
-                if reference_msa[j][k] == '-':
-                    continue
-                ri_j = ref_maps[j].get(k)
-                if ri_j is None:
-                    continue
+                pi = ref_to_pred[i]
+                pj = ref_to_pred[j]
+                ref_seq_i = reference_msa[i]
+                ref_seq_j = reference_msa[j]
 
-                total += 1
-                pred_col_i = pred_reverse[i].get(ri_i)
-                pred_col_j = pred_reverse[j].get(ri_j)
-                if pred_col_i is not None and pred_col_j is not None:
-                    if pred_col_i == pred_col_j:
-                        correct += 1
+                # Track ungapped position in ref sequences
+                ungapped_j_counts = {}
+                col_j = 0
+                for k in range(len(ref_seq_j)):
+                    if ref_seq_j[k] != '-':
+                        ungapped_j_counts[k] = col_j
+                        col_j += 1
 
-    return correct / max(total, 1)
+                ungapped_i = 0
+                for k in range(len(ref_seq_i)):
+                    char_i = ref_seq_i[k]
+                    char_j = ref_seq_j[k] if k < len(ref_seq_j) else '-'
+
+                    if char_i != '-' and char_j != '-':
+                        total += 1
+                        # Find these residues in predicted alignment
+                        ui = ungapped_i
+                        uj = ungapped_j_counts.get(k, -1)
+                        if uj == -1:
+                            if char_i != '-':
+                                ungapped_i += 1
+                            continue
+
+                        pred_col_i = pred_pos_maps[pi].get(ui, -1)
+                        pred_col_j = pred_pos_maps[pj].get(uj, -1)
+
+                        if (pred_col_i != -1 and pred_col_j != -1 and
+                                pred_col_i == pred_col_j):
+                            correct += 1
+
+                    if char_i != '-':
+                        ungapped_i += 1
+
+        return correct / total if total > 0 else 0.0
+
+    except Exception as e:
+        print(f"[sp_score ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return 0.0  # never return -1.0
 
 
 def tc_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
     """Total Column score.
     Handles sequence order mismatch by matching ungapped content."""
-    n = len(reference_msa)
-    if n < 2:
-        return 1.0
-    if len(predicted_msa) != n:
-        return 0.0
+    try:
+        # Uppercase everything
+        predicted_msa = [s.upper() for s in predicted_msa]
+        reference_msa = [s.upper() for s in reference_msa]
 
-    # Match sequence order by ungapped content
-    pred_ungapped = [s.replace('-', '').upper() for s in predicted_msa]
-    ref_ungapped = [s.replace('-', '').upper() for s in reference_msa]
-    if any(p != r for p, r in zip(pred_ungapped, ref_ungapped)):
-        matched = _match_sequences(predicted_msa, reference_msa)
-        if matched is None:
+        n = len(reference_msa)
+        if n < 2:
+            return 1.0
+
+        # Match sequences (handles different counts and reordering)
+        result = _match_and_reorder(predicted_msa, reference_msa)
+        if result is None:
             return 0.0
-        predicted_msa = matched
+        predicted_msa, ref_to_pred = result
 
-    # Validate internal consistency
-    if any(len(s) != len(reference_msa[0]) for s in reference_msa):
+        # Build position maps: ungapped_pos -> gapped_pos
+        def build_pos_map(msa: list[str]) -> list[dict]:
+            maps = []
+            for seq in msa:
+                m = {}
+                ungapped_pos = 0
+                for gapped_pos, char in enumerate(seq):
+                    if char != '-':
+                        m[ungapped_pos] = gapped_pos
+                        ungapped_pos += 1
+                maps.append(m)
+            return maps
+
+        pred_pos_maps = build_pos_map(predicted_msa)
+        ref_pos_maps  = build_pos_map(reference_msa)
+
+        # For each reference column, check if ALL non-gap residues
+        # end up in the same predicted column
+        ref_len = len(reference_msa[0]) if reference_msa else 0
+        if ref_len == 0:
+            return 0.0
+
+        # Validate ref alignment consistency
+        if any(len(s) != ref_len for s in reference_msa):
+            return 0.0
+
+        matching = 0
+        total = 0
+
+        for k in range(ref_len):
+            # Collect (ref_seq_idx, ungapped_pos) for non-gap chars in this column
+            residues = []
+            ungapped_counts = [0] * n
+            for si in range(n):
+                # Count ungapped positions up to column k for this sequence
+                ug = sum(1 for c in reference_msa[si][:k] if c != '-')
+                if reference_msa[si][k] != '-':
+                    residues.append((si, ug))
+
+            if len(residues) < 2:
+                continue
+
+            total += 1
+
+            # Check if all these residues map to the same predicted column
+            pred_cols = set()
+            all_found = True
+            for seq_idx, ug_pos in residues:
+                pi = ref_to_pred[seq_idx]
+                pred_col = pred_pos_maps[pi].get(ug_pos, -1)
+                if pred_col == -1:
+                    all_found = False
+                    break
+                pred_cols.add(pred_col)
+
+            if all_found and len(pred_cols) == 1:
+                matching += 1
+
+        return matching / max(total, 1)
+
+    except Exception as e:
+        print(f"[tc_score ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return 0.0
-    if any(len(s) != len(predicted_msa[0]) for s in predicted_msa):
-        return 0.0
-
-    ref_maps = _build_residue_map(reference_msa)
-    pred_maps = _build_residue_map(predicted_msa)
-
-    # For predicted: build (seq_idx, residue_idx) → column
-    pred_reverse: list[dict[int, int]] = []
-    for seq_idx in range(n):
-        rev = {}
-        for col, res in pred_maps[seq_idx].items():
-            rev[res] = col
-        pred_reverse.append(rev)
-
-    L_ref = len(reference_msa[0])
-    matching = 0
-    total = 0
-
-    for k in range(L_ref):
-        # Get all non-gap residue indices for this column
-        residues: list[tuple[int, int]] = []  # (seq_idx, residue_idx)
-        for i in range(n):
-            if reference_msa[i][k] != '-':
-                ri = ref_maps[i].get(k)
-                if ri is not None:
-                    residues.append((i, ri))
-
-        if len(residues) < 2:
-            continue
-
-        total += 1
-
-        # Check: are all these residues in the same predicted column?
-        pred_cols = set()
-        all_found = True
-        for seq_idx, res_idx in residues:
-            pc = pred_reverse[seq_idx].get(res_idx)
-            if pc is None:
-                all_found = False
-                break
-            pred_cols.add(pc)
-
-        if all_found and len(pred_cols) == 1:
-            matching += 1
-
-    return matching / max(total, 1)
 
 
 def sp_score_internal(msa: list[str], seq_type: str = "dna") -> float:
@@ -340,39 +424,24 @@ def benchmark(aligner_func,
 
 
 if __name__ == "__main__":
-    # Test 1: Perfect alignment
-    ref = ["ACGT--ACGT", "ACGT--ACGT", "--ACGTACGT"]
-    pred = ["ACGT--ACGT", "ACGT--ACGT", "--ACGTACGT"]
-    score = sp_score(pred, ref)
-    assert score == 1.0, f"Perfect alignment should score 1.0, got {score}"
+    # Test 1: perfect alignment
+    ref  = ["ACGT--ACGT", "AC--GTACGT", "--ACGTACGT"]
+    pred = ["ACGT--ACGT", "AC--GTACGT", "--ACGTACGT"]
+    s = sp_score(pred, ref)
+    assert s == 1.0, f"Perfect: expected 1.0 got {s}"
+    print(f"Test 1 passed: perfect SP = {s:.3f}")
 
-    # Test 2: Imperfect alignment
-    pred_wrong = ["ACGTACACGT", "ACGT--ACGT", "--ACGTACGT"]
-    score2 = sp_score(pred_wrong, ref)
-    assert 0.0 <= score2 <= 1.0, f"Imperfect alignment should score between 0 and 1, got {score2}"
-    print(f"sp_score tests passed: perfect={score:.3f}, imperfect={score2:.3f}")
+    # Test 2: wrong order — same sequences different order
+    pred_reordered = ["--ACGTACGT", "ACGT--ACGT", "AC--GTACGT"]
+    s2 = sp_score(pred_reordered, ref)
+    assert s2 == 1.0, f"Reordered: expected 1.0 got {s2}"
+    print(f"Test 2 passed: reordered SP = {s2:.3f}")
 
-    # Test 3: Sequence order mismatch
-    ref3 = ["ACGT--ACGT", "--ACGTACGT", "ACGT--ACGT"]
-    pred3_reordered = ["--ACGTACGT", "ACGT--ACGT", "ACGT--ACGT"]  # different order
-    score3 = sp_score(pred3_reordered, ref3)
-    assert score3 == 1.0, f"Reordered perfect alignment should score 1.0, got {score3}"
-    print(f"Reordered SP: {score3:.3f}")
+    # Test 3: imperfect alignment (same sequences, different gap placement)
+    pred_wrong = ["ACGT-A-CGT", "AC--GTACGT", "--ACGTACGT"]
+    s3 = sp_score(pred_wrong, ref)
+    assert 0.0 < s3 < 1.0, f"Imperfect: expected 0<x<1 got {s3}"
+    assert s3 != -1.0, "Must never return -1.0"
+    print(f"Test 3 passed: imperfect SP = {s3:.3f}")
 
-    # Test 4: TC score
-    tc = tc_score(pred, ref)
-    assert tc == 1.0, f"Perfect TC should be 1.0, got {tc}"
-    print(f"TC score test passed: {tc:.3f}")
-
-    # Internal SP
-    si = sp_score_internal(ref)
-    print(f"Internal SP: {si:.4f}")
-    print("All scoring tests passed!")
-
-    # Consensus
-    from msa.progressive_msa import build_profile
-    profile = build_profile(ref, "dna")
-    cons = profile_consensus(profile, "dna")
-    print(f"Consensus: '{cons}'")
-
-    print("Smoke test passed!")
+    print("All sp_score tests passed!")

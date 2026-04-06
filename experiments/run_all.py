@@ -404,6 +404,53 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
                 return [(0, hw) for _ in pairs]
         return progressive_msa(seqs, ids, FixedPredictor(), seq_type=st)
 
+    # --- DIAGNOSTIC RUN ---
+    first_group = groups[0]
+    import subprocess, tempfile, os as _os
+    from Bio import SeqIO, AlignIO
+    from io import StringIO
+
+    # Run MAFFT directly
+    _diag_seqs = first_group["sequences"]
+    _diag_ref  = first_group["reference"]
+    _diag_ids  = first_group["seq_ids"]
+
+    # Write input FASTA
+    _fasta_in = "\n".join(f">{_diag_ids[i]}\n{_diag_seqs[i]}" for i in range(len(_diag_seqs)))
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta',
+                                     delete=False) as _f:
+        _f.write(_fasta_in)
+        _tmp_in = _f.name
+
+    # Run MAFFT
+    _result = subprocess.run(
+        ["mafft", "--auto", "--quiet", _tmp_in],
+        capture_output=True, text=True
+    )
+    _mafft_output = _result.stdout
+
+    # Parse MAFFT output
+    _records = list(SeqIO.parse(StringIO(_mafft_output), "fasta"))
+    _predicted = [str(r.seq).upper() for r in _records]
+    _pred_ids  = [r.id for r in _records]
+
+    print("="*60)
+    print(f"GROUP: {first_group['group_id']}")
+    print(f"N sequences: {len(_diag_seqs)}")
+    print(f"Reference sequences: {len(_diag_ref)}")
+    print(f"Predicted sequences: {len(_predicted)}")
+    print(f"Ref seq IDs:  {first_group['seq_ids'][:3]}")
+    print(f"Pred seq IDs: {_pred_ids[:3]}")
+    print(f"Ref lengths (unique):  {sorted(set(len(s) for s in _diag_ref))}")
+    print(f"Pred lengths (unique): {sorted(set(len(s) for s in _predicted))}")
+    print(f"Ref[0][:80]:  {_diag_ref[0][:80]}")
+    print(f"Pred[0][:80]: {_predicted[0][:80]}")
+    print(f"Ref gaps:  {[s.count('-') for s in _diag_ref]}")
+    print(f"Pred gaps: {[s.count('-') for s in _predicted]}")
+    print("="*60)
+    _os.unlink(_tmp_in)
+    # --- END DIAGNOSTIC ---
+
     methods = {}
 
     # Classical baselines (may fail if tools not installed)
