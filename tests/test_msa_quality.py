@@ -166,15 +166,22 @@ def test_full_comparison(balibase_test, predictor) -> None:
         print(f"\nRunning {name}...")
         df = run_benchmark(fn, groups)
         all_results[name] = df
-        print(f"  SP={df.sp.mean():.3f}, TC={df.tc.mean():.3f}, "
-              f"Time={df.time_s.mean():.2f}s")
+        if df.empty:
+            print(f"  (no groups with valid reference)")
+        else:
+            print(f"  SP={df.sp.mean():.3f}, TC={df.tc.mean():.3f}, "
+                  f"Time={df.time_s.mean():.2f}s")
+
+    # Skip if no valid results
+    if all(df.empty for df in all_results.values()):
+        pytest.skip("No BAliBASE groups with valid reference alignments")
 
     # Summary table
     summary = pd.DataFrame({
         name: {
-            "SP_mean": round(df.sp.mean(), 3),
-            "TC_mean": round(df.tc.mean(), 3),
-            "Time_mean": round(df.time_s.mean(), 2),
+            "SP_mean": round(df.sp.mean(), 3) if not df.empty else 0.0,
+            "TC_mean": round(df.tc.mean(), 3) if not df.empty else 0.0,
+            "Time_mean": round(df.time_s.mean(), 2) if not df.empty else 0.0,
         }
         for name, df in all_results.items()
     }).T
