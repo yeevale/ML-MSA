@@ -106,16 +106,28 @@ class BAliBASELoader:
         return list(dict.fromkeys(tfa_files))  # deduplicate preserving order
 
     def _load_xml_reference(self, xml_path: Path) -> list[str] | None:
-        """Parse BAliBASE XML alignment file. Returns list of aligned sequences."""
+        """Parse BAliBASE alignment file. Returns list of aligned sequences.
+        BAliBASE 'XML' files are often FASTA-formatted despite the extension."""
+        # Try reading as FASTA first (BAliBASE .xml files are often FASTA)
+        try:
+            records = load_fasta_with_gaps(str(xml_path))
+            if records and len(records) >= 2:
+                seqs = [r[1] for r in records]
+                # Validate: all same length and contain gaps
+                if (len(set(len(s) for s in seqs)) == 1
+                        and any('-' in s for s in seqs)):
+                    return seqs
+        except Exception:
+            pass
+
+        # Try actual XML parsing
         try:
             import xml.etree.ElementTree as ET
             tree = ET.parse(str(xml_path))
             root = tree.getroot()
             aligned: list[str] = []
-            # Try all common BAliBASE XML element/attribute patterns
             for seq_el in root.iter():
                 if seq_el.tag.lower() in ("seq", "sequence", "aligned", "aln"):
-                    # Data may be in text, or child 'data'/'seq'/'aligned'
                     data_el = (seq_el.find("data") or seq_el.find("seq")
                                or seq_el.find("aligned"))
                     text = (data_el.text if data_el is not None
@@ -127,7 +139,8 @@ class BAliBASELoader:
                 return aligned
         except Exception:
             pass
-        # Fallback: try reading as FASTA (some BAliBASE sets use .fasta/.aln)
+
+        # Fallback: try other extensions
         for ext in [".fasta", ".fa", ".aln", ".msf"]:
             alt = xml_path.with_suffix(ext)
             if alt.exists():
