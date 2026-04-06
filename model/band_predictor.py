@@ -159,10 +159,14 @@ class BandPredictor(nn.Module):
 def asymmetric_huber_loss(pred_log_hw: torch.Tensor,
                           true_hw: torch.Tensor,
                           delta: float = 1.0,
-                          penalty: float = 5.0) -> torch.Tensor:
+                          penalty: float = 15.0,
+                          margin: float = 0.3) -> torch.Tensor:
     """Asymmetric Huber loss for band width.
-    Underestimation (pred < true) penalised `penalty`× more."""
-    true_log_hw = torch.log(true_hw.float() + 1.0)
+    Underestimation (pred < true) penalised `penalty`× more.
+    `margin` shifts the target upward in log-space so the model
+    learns to predict ~exp(margin) wider than the true band,
+    boosting recall@1x."""
+    true_log_hw = torch.log(true_hw.float() + 1.0) + margin
     err = pred_log_hw - true_log_hw
     # Element-wise Huber
     abs_err = err.abs()
@@ -178,8 +182,8 @@ def asymmetric_huber_loss(pred_log_hw: torch.Tensor,
 def band_loss(pred: torch.Tensor,
               true_centre: torch.Tensor,
               true_hw: torch.Tensor,
-              lam: float = 2.0,
-              penalty: float = 5.0) -> torch.Tensor:
+              lam: float = 4.0,
+              penalty: float = 15.0) -> torch.Tensor:
     """Combined loss = MSE(centre) + lam * AsymmetricHuber(width).
     pred: (batch, 2) — pred[:,0]=centre, pred[:,1]=log_hw."""
     centre_loss = F.mse_loss(pred[:, 0], true_centre.float())
