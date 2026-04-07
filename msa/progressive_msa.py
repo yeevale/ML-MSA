@@ -2,8 +2,9 @@
 # Post-order traversal of guide tree (bottom-up), N-1 merge steps.
 # At each step: NN predicts band → C++ aligns within band.
 #
-# LAZY PROFILES: after merging left+right, delete both children.
-# Peak memory: O(log N) profiles simultaneously.
+# CONSENSUS-BASED ALIGNMENT: each node stores a consensus string
+# (majority-vote per column). Alignment uses fast sequence NW (SIMD),
+# not slow profile-profile DP.
 #
 # BATCHED INFERENCE BY LEVEL: tree_levels() groups same-depth nodes
 # into a single batch for the neural net — critical for GPU efficiency.
@@ -11,14 +12,12 @@
 # ANCHOR MODE: for sequences longer than MAX_DIRECT_LEN,
 # split via anchors before aligning blocks.
 
-import gc
 import numpy as np
 
 from msa.guide_tree import (
     pairwise_distance_matrix, build_guide_tree,
     tree_levels, TreeNode, assign_node_ids, get_leaves,
 )
-from features.profile_features import make_input
 from features.anchors import (
     MAX_DIRECT_LEN, find_anchors, chain_anchors, split_by_anchors, needs_anchoring,
 )
@@ -33,7 +32,8 @@ def build_profile(aligned_seqs: list[str],
                   seq_type: str = "dna") -> np.ndarray:
     """Build frequency profile from aligned sequences.
     Returns shape (alignment_length, alphabet_size) float32.
-    alphabet = ACGT- (5) for DNA, 20aa+- (21) for protein."""
+    alphabet = ACGT- (5) for DNA, 20aa+- (21) for protein.
+    Kept for iterative_refine compatibility."""
     if not aligned_seqs:
         return np.zeros((0, 5 if seq_type == "dna" else 21), dtype=np.float32)
 
@@ -53,51 +53,27 @@ def build_profile(aligned_seqs: list[str],
     return profile
 
 
-def _align_profiles_with_fallback(obj1: np.ndarray, obj2: np.ndarray,
-                                   subst_np: np.ndarray,
-                                   centre: int, hw: int) -> tuple[str, str]:
-    """Align two profiles, handling C++ returning empty alignment strings.
-    Returns (aligned_repr1, aligned_repr2) gap pattern strings of EQUAL length.
-    Non-gap chars in a1 == obj1.shape[0], non-gap chars in a2 == obj2.shape[0]."""
-    r = aligner.align_profiles_with_doubling(
-        obj1, obj2, subst_np, centre, hw)
-    a1 = r.alignment.aligned_seq1
-    a2 = r.alignment.aligned_seq2
-
-    if a1 and a2 and len(a1) == len(a2):
-        return a1, a2
-
-    # C++ profile aligner returned empty strings (score-only mode).
-    # Create dummy strings of exact profile lengths and align them.
-    # Content doesn't matter — only the gap pattern matters for apply_gaps_to_seqs.
-    L1 = obj1.shape[0]
-    L2 = obj2.shape[0]
-
-    dummy1 = 'X' * L1
-    dummy2 = 'X' * L2
-
-    if L1 == 0 and L2 == 0:
-        return '', ''
-    if L1 == 0:
-        return '-' * L2, dummy2
-    if L2 == 0:
-        return dummy1, '-' * L1
-
-    r2 = aligner.align_with_doubling(dummy1, dummy2, centre, hw,
-                                     -1.0, -0.5, False)
-    a1 = r2.alignment.aligned_seq1
-    a2 = r2.alignment.aligned_seq2
-
-    if not a1 or not a2 or len(a1) != len(a2):
-        # Last resort: simple pad-to-longer alignment
-        max_len = max(L1, L2)
-        a1 = dummy1 + '-' * (max_len - L1)
-        a2 = dummy2 + '-' * (max_len - L2)
-
-    return a1, a2
-
-    """Return list[bool]: True where aligned string has a character, False for gap."""
-    return [c != '-' for c in aligned]
+def _consensus_seq(aligned_seqs: list[str], seq_type: str = "dna") -> str:
+    """Majority-vote consensus from aligned sequences.
+    Gap-only columns get 'N' (DNA) or 'X' (protein) to preserve column count.
+    This ensures len(consensus) == len(aligned_seqs[0])."""
+    if not aligned_seqs:
+        return ""
+    L = len(aligned_seqs[0])
+    alpha = set("ACGT") if seq_type == "dna" else set("ACDEFGHIKLMNPQRSTVWY")
+    gap_rep = 'N' if seq_type == "dna" else 'X'
+    result: list[str] = []
+    for col in range(L):
+        counts: dict[str, int] = {}
+        for seq in aligned_seqs:
+            c = seq[col].upper()
+            if c in alpha:
+                counts[c] = counts.get(c, 0) + 1
+        if counts:
+            result.append(max(counts, key=counts.get))
+        else:
+            result.append(gap_rep)
+    return "".join(result)
 
 
 def apply_gaps_to_seqs(seqs: list[str], aligned_repr: str) -> list[str]:
@@ -220,8 +196,9 @@ def progressive_msa(sequences: list[str],
 
     1. Build distance matrix + guide tree
     2. Traverse bottom-up by level, batching NN predictions
-    3. Merge sequences/profiles at each internal node
-    4. Return final MSA as list of aligned strings
+    3. Align consensus sequences at each internal node (fast SIMD NW)
+    4. Apply gap pattern to all child sequences
+    5. Return final MSA as list of aligned strings
     """
     n = len(sequences)
     if n == 0:
@@ -236,7 +213,8 @@ def progressive_msa(sequences: list[str],
 
     # 2. Initialise leaf data
     leaves = get_leaves(tree)
-    node_objects: dict[int, str | np.ndarray] = {}
+    # node_objects stores consensus strings (for NN features + alignment)
+    node_objects: dict[int, str] = {}
     seq_groups: dict[int, list[str]] = {}
 
     for leaf in leaves:
@@ -259,59 +237,30 @@ def progressive_msa(sequences: list[str],
 
         # Process each node in this level
         for node, (centre, hw) in zip(level, predictions):
-            obj1 = node_objects[node.left.node_id]
-            obj2 = node_objects[node.right.node_id]
+            cons_left = node_objects[node.left.node_id]
+            cons_right = node_objects[node.right.node_id]
             left_seqs = seq_groups[node.left.node_id]
             right_seqs = seq_groups[node.right.node_id]
 
-            # Align the pair
-            if isinstance(obj1, str) and isinstance(obj2, str):
-                raw1 = _ungap(obj1)
-                raw2 = _ungap(obj2)
-                if needs_anchoring(raw1, raw2):
-                    a1, a2 = align_pair_with_anchors(
-                        raw1, raw2, predictor, seq_type)
-                else:
-                    r = aligner.align_with_doubling(
-                        raw1, raw2, centre, hw)
-                    a1 = r.alignment.aligned_seq1
-                    a2 = r.alignment.aligned_seq2
-
-                new_left = apply_gaps_to_seqs(left_seqs, a1)
-                new_right = apply_gaps_to_seqs(right_seqs, a2)
-
-            elif isinstance(obj1, np.ndarray) and isinstance(obj2, np.ndarray):
-                # Profile-profile alignment
-                subst = _get_subst_matrix(seq_type)
-                subst_np = np.ascontiguousarray(subst, dtype=np.float32)
-                a1, a2 = _align_profiles_with_fallback(
-                    obj1, obj2, subst_np, centre, hw)
-
-                new_left = apply_gaps_to_seqs(left_seqs, a1)
-                new_right = apply_gaps_to_seqs(right_seqs, a2)
+            # Align consensus sequences (fast SIMD-accelerated NW)
+            if needs_anchoring(cons_left, cons_right):
+                a1, a2 = align_pair_with_anchors(
+                    cons_left, cons_right, predictor, seq_type)
             else:
-                # Mixed: one is str, other is profile
-                # Convert str to profile first
-                if isinstance(obj1, str):
-                    obj1_p = build_profile([obj1], seq_type)
-                    obj2_p = obj2
-                else:
-                    obj1_p = obj1
-                    obj2_p = build_profile([obj2], seq_type)
+                r = aligner.align_with_doubling(
+                    cons_left, cons_right, centre, hw)
+                a1 = r.alignment.aligned_seq1
+                a2 = r.alignment.aligned_seq2
 
-                subst = _get_subst_matrix(seq_type)
-                subst_np = np.ascontiguousarray(subst, dtype=np.float32)
-                a1, a2 = _align_profiles_with_fallback(
-                    obj1_p, obj2_p, subst_np, centre, hw)
-
-                new_left = apply_gaps_to_seqs(left_seqs, a1)
-                new_right = apply_gaps_to_seqs(right_seqs, a2)
+            # Apply gap pattern from consensus alignment to all sequences
+            new_left = apply_gaps_to_seqs(left_seqs, a1)
+            new_right = apply_gaps_to_seqs(right_seqs, a2)
 
             # Merge
             new_seqs = new_left + new_right
-            new_profile = build_profile(new_seqs, seq_type)
 
-            node_objects[node.node_id] = new_profile
+            # Store consensus for next level (for NN features + alignment)
+            node_objects[node.node_id] = _consensus_seq(new_seqs, seq_type)
             seq_groups[node.node_id] = new_seqs
 
             # Free children memory
@@ -319,28 +268,23 @@ def progressive_msa(sequences: list[str],
             del node_objects[node.right.node_id]
             del seq_groups[node.left.node_id]
             del seq_groups[node.right.node_id]
-            gc.collect()
 
     # 4. Return final MSA
     return seq_groups[tree.node_id]
 
 
-def _get_subst_matrix(seq_type: str) -> np.ndarray:
-    """Get substitution matrix for profile-profile alignment."""
-    from features.profile_features import DNA_SUBST, _ensure_blosum62
-    if seq_type == "dna":
-        return DNA_SUBST
-    else:
-        return _ensure_blosum62()
-
-
 if __name__ == "__main__":
-    # Smoke test — just test build_profile and apply_gaps
+    # Smoke test — test build_profile, consensus, and apply_gaps
     seqs = ["ACGT", "AC-T", "A-GT"]
     profile = build_profile(seqs, "dna")
     print(f"Profile shape: {profile.shape}")
     assert profile.shape == (4, 5)  # 4 cols, 5 = ACGT-
     print(f"Column 0 freqs: {profile[0]}")  # A should be 1.0
+
+    # Test consensus
+    cons = _consensus_seq(seqs, "dna")
+    print(f"Consensus: '{cons}'")
+    assert len(cons) == 4  # same as aligned length
 
     # Test apply_gaps_to_seqs
     aligned = "A-C-GT"

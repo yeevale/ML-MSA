@@ -284,44 +284,6 @@ def exp_ablation_study(predictor, results_dir: str) -> dict:
     }
 
 
-def exp_fr_hit_ratio(results_dir: str) -> dict:
-    """
-    Experiment 4: Four Russians lookup table accumulation.
-    Shows how hit_ratio grows with each new pair.
-    """
-    import aligner
-
-    fr = aligner.FourRussiansAligner(0, False, -10.0, -0.5, 16)
-    rng = np.random.default_rng(42)
-    history = []
-
-    for i in range(300):
-        seq1 = "".join(rng.choice(list("ACGT"), 500))
-        seq2 = "".join(rng.choice(list("ACGT"), 500))
-        fr.last_row(seq1, seq2, 0, 50)
-
-        if i % 10 == 9:
-            stats = fr.get_stats()
-            history.append({
-                "n_pairs":   i + 1,
-                "hit_ratio": round(stats.hit_ratio, 4),
-                "table_kb":  fr.table_memory_bytes() // 1024,
-            })
-            print(f"  After {i+1:4d} pairs: hit_ratio={stats.hit_ratio:.1%}, "
-                  f"table={fr.table_memory_bytes()//1024}KB")
-
-    df = pd.DataFrame(history)
-    csv_path = os.path.join(results_dir, "fr_hit_ratio.csv")
-    df.to_csv(csv_path, index=False)
-
-    return {
-        "initial_hit_ratio": history[0]["hit_ratio"] if history else 0,
-        "final_hit_ratio":   history[-1]["hit_ratio"] if history else 0,
-        "final_table_kb":    history[-1]["table_kb"] if history else 0,
-        "history_csv":       csv_path,
-    }
-
-
 def _generate_dna_msa_group(n_seqs: int, root_len: int, divergence: str,
                             rng: np.random.Generator) -> dict:
     """Generate a synthetic DNA MSA group with a known reference alignment.
@@ -740,15 +702,7 @@ def main():
             args.results_dir
         )
 
-    # Experiment 4: Four Russians hit ratio (no model needed)
-    if "fr" not in args.skip:
-        all_results["fr_hit_ratio"] = run_experiment(
-            "fr_hit_ratio",
-            lambda: exp_fr_hit_ratio(args.results_dir),
-            args.results_dir
-        )
-
-    # Experiment 5: MSA quality on synthetic DNA (needs model)
+    # Experiment 4: MSA quality on synthetic DNA (needs model)
     if "msa_quality" not in args.skip and model_available:
         all_results["msa_quality"] = run_experiment(
             "msa_quality",
@@ -756,7 +710,7 @@ def main():
             args.results_dir
         )
 
-    # Experiment 6: Scaling by N (needs model)
+    # Experiment 5: Scaling by N (needs model)
     if "scaling" not in args.skip and model_available:
         all_results["scaling_by_n"] = run_experiment(
             "scaling_by_n",

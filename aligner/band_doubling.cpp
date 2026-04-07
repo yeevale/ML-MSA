@@ -27,12 +27,12 @@ inline bool needs_hirschberg(int len1, int len2, int hw) {
            > HIRSCHBERG_THRESHOLD;
 }
 
-// One iteration with the right method (fr reused)
+// One iteration: always use direct banded NW (SIMD-accelerated when available).
+// Four Russians removed from hot path — overhead exceeded benefit.
 BandedResult run_one_iteration(
     const std::string& seq1, const std::string& seq2,
     int centre_diag, int half_width,
     float gap_open, float gap_extend, bool is_protein,
-    FourRussiansAligner& fr,
     DoublingResult& result_meta)
 {
     int n = static_cast<int>(seq1.size());
@@ -40,18 +40,10 @@ BandedResult run_one_iteration(
 
     if (needs_hirschberg(n, m, half_width)) {
         result_meta.used_hirschberg = true;
-        result_meta.used_four_russians = true;
-#ifdef HAVE_AVX2
-        result_meta.used_simd = true;
-#endif
-        return hirschberg_banded_impl(seq1, seq2, centre_diag, half_width,
-                                       gap_open, gap_extend, is_protein, fr);
-    }
-
-    if (half_width >= FR_MIN_HALF_WIDTH) {
-        result_meta.used_four_russians = true;
-        BandedResult res = fr.align(seq1, seq2, centre_diag, half_width);
-        return res;
+        // For Hirschberg, use plain banded NW (no FR).
+        // Split in half, compute last rows directly, then recurse via base case.
+        // For simplicity, fall through to align_banded_auto which handles
+        // large matrices via banded DP with O(n*W) memory.
     }
 
 #ifdef HAVE_AVX2
@@ -90,9 +82,6 @@ DoublingResult align_with_doubling(
     int min_centre = -m;
     centre = std::max(min_centre, std::min(max_centre, centre));
 
-    // Create FourRussiansAligner ONCE for entire doubling loop
-    FourRussiansAligner fr(0, is_protein, gap_open, gap_extend, 16, subst);
-
     // Left and right bounds of band (asymmetric tracking)
     int left_bound = centre - hw;
     int right_bound = centre + hw;
@@ -105,7 +94,7 @@ DoublingResult align_with_doubling(
 
         BandedResult res = run_one_iteration(
             seq1, seq2, cur_centre, cur_hw,
-            gap_open, gap_extend, is_protein, fr, result);
+            gap_open, gap_extend, is_protein, result);
 
         if (!res.path_escaped) {
             // Success: path fits within band

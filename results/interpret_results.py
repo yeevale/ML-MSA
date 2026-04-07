@@ -193,33 +193,8 @@ def generate_report(results_dir: str, output: str):
         lines.append("*Experiment skipped or failed*")
     lines.append("")
 
-    # ---------- Experiment 4: Four Russians ----------
-    lines.append("## 5. Four Russians Lookup Table Accumulation")
-    fr = load_json(os.path.join(exp_dir, "fr_hit_ratio.json"))
-    if fr and fr.get("_status") == "OK":
-        lines.append("")
-        lines.append(f"- **Initial hit_ratio:** {fmt(fr.get('initial_hit_ratio'))}")
-        lines.append(f"- **Final hit_ratio:** {fmt(fr.get('final_hit_ratio'))}")
-        lines.append(f"- **Table size:** {fr.get('final_table_kb', 0)} KB")
-        lines.append("")
-        csv_path = os.path.join(exp_dir, "fr_hit_ratio.csv")
-        if os.path.exists(csv_path) and HAS_PANDAS:
-            df = pd.read_csv(csv_path)
-            lines.append("| Pairs processed | Hit ratio | Table (KB) |")
-            lines.append("|---|---|---|")
-            for _, row in df.iterrows():
-                lines.append(
-                    f"| {int(row['n_pairs'])} "
-                    f"| {row['hit_ratio']:.1%} "
-                    f"| {int(row['table_kb'])} |"
-                )
-    else:
-        lines.append("")
-        lines.append("*Experiment skipped or failed*")
-    lines.append("")
-
-    # ---------- Experiment 5: MSA quality ----------
-    lines.append("## 6. MSA Quality")
+    # ---------- Experiment 4: MSA quality ----------
+    lines.append("## 5. MSA Quality")
     msa_q = load_json(os.path.join(exp_dir, "msa_quality.json"))
     if msa_q and msa_q.get("_status") == "OK":
         lines.append("")
@@ -251,8 +226,8 @@ def generate_report(results_dir: str, output: str):
         lines.append("*Experiment skipped (no model)*")
     lines.append("")
 
-    # ---------- Experiment 6: scaling ----------
-    lines.append("## 7. Scaling by Number of Sequences N")
+    # ---------- Experiment 5: scaling ----------
+    lines.append("## 6. Scaling by Number of Sequences N")
     scaling = load_json(os.path.join(exp_dir, "scaling_by_n.json"))
     if scaling and scaling.get("_status") == "OK":
         lines.append("")
@@ -274,7 +249,7 @@ def generate_report(results_dir: str, output: str):
     lines.append("")
 
     # ---------- Tests ----------
-    lines.append("## 8. Test Results")
+    lines.append("## 7. Test Results")
     test_report = load_json(os.path.join(results_dir, "tests/full_test_report.json"))
     if test_report:
         summary_t = test_report.get("summary", {})
@@ -290,7 +265,7 @@ def generate_report(results_dir: str, output: str):
     lines.append("")
 
     # ---------- System info ----------
-    lines.append("## 9. System Information")
+    lines.append("## 8. System Information")
     sysinfo = load_json(os.path.join(results_dir, "system_info.json"))
     if sysinfo:
         lines.append("")
