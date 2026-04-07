@@ -219,7 +219,7 @@ def generate_report(results_dir: str, output: str):
     lines.append("")
 
     # ---------- Experiment 5: MSA quality ----------
-    lines.append("## 6. MSA Quality on BAliBASE")
+    lines.append("## 6. MSA Quality")
     msa_q = load_json(os.path.join(exp_dir, "msa_quality.json"))
     if msa_q and msa_q.get("_status") == "OK":
         lines.append("")
@@ -248,7 +248,7 @@ def generate_report(results_dir: str, output: str):
                 )
     else:
         lines.append("")
-        lines.append("*Experiment skipped (no BAliBASE or model)*")
+        lines.append("*Experiment skipped (no model)*")
     lines.append("")
 
     # ---------- Experiment 6: scaling ----------

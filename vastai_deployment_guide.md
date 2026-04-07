@@ -14,14 +14,11 @@
 2. Создать скрипт `vastai_run.sh` — запуск обучения и всех экспериментов
 3. Создать скрипт `vastai_download.sh` — скачивание результатов на локальную машину
 4. Создать `experiments/run_all.py` — единая точка запуска всех экспериментов
-5. Обновить `data/loaders.py` — загрузка BAliBASE из новой структуры папок
+5. Проверить `data/loaders.py` — FASTA file loaders
 6. Создать `results/interpret_results.py` — форматирование результатов для анализа
 
 **Датасеты:**
 - Синтетика: `data/processed/train.parquet` (50k пар, уже готово) + догенерировать до 500k
-- BAliBASE: `data/raw/balibase/DATASET-BALiBASE/` со структурой:
-  - `Aligned sequences/*.xml` — эталонные выравнивания
-  - `Unaligned sequences/*.tfa` — исходные последовательности
 
 ---
 
@@ -156,15 +153,7 @@ if [ -f "data/processed/val.parquet" ]; then
     echo "  Synthetic val: $VAL_SIZE samples"
 fi
 
-# BAliBASE
-if [ -d "data/raw/balibase/DATASET-BALiBASE" ]; then
-    BALI_ALIGNED=$(ls data/raw/balibase/DATASET-BALiBASE/Aligned\ sequences/*.xml 2>/dev/null | wc -l)
-    BALI_UNALIGNED=$(ls data/raw/balibase/DATASET-BALiBASE/Unaligned\ sequences/*.tfa 2>/dev/null | wc -l)
-    echo "  BAliBASE: $BALI_ALIGNED aligned, $BALI_UNALIGNED unaligned groups"
-else
-    echo "  WARNING: BAliBASE not found at data/raw/balibase/DATASET-BALiBASE"
-    echo "  MSA quality tests will be skipped"
-fi
+echo "  Data check complete."
 
 # --------------------------------------------------------------------------
 # 6. Быстрая проверка импортов
@@ -281,43 +270,10 @@ fi
 echo "Data generation complete."
 
 # --------------------------------------------------------------------------
-# ШАГ 2: Конвертация BAliBASE в parquet (если доступен)
+# ШАГ 2: Обучение нейросети
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 2: BAliBASE Preparation ==="
-
-BALIBASE_DIR="data/raw/balibase/DATASET-BALiBASE"
-if [ -d "$BALIBASE_DIR" ]; then
-    echo "Converting BAliBASE to parquet..."
-    python -c "
-from data.loaders import BAliBASELoader
-import pandas as pd
-
-loader = BAliBASELoader('$BALIBASE_DIR')
-groups = loader.load_all()
-print(f'Loaded {len(groups)} BAliBASE groups')
-
-train_g, val_g, test_g = loader.train_val_test_split()
-print(f'Train: {len(train_g)}, Val: {len(val_g)}, Test: {len(test_g)}')
-
-# Сохранить сплиты как JSON для экспериментов
-import json
-for split_name, split_data in [('train', train_g), ('val', val_g), ('test', test_g)]:
-    with open(f'data/balibase_{split_name}.json', 'w') as f:
-        json.dump(split_data, f)
-    print(f'Saved balibase_{split_name}.json')
-" 2>&1 | tee logs/balibase_prep.log
-    BALIBASE_AVAILABLE=1
-else
-    echo "BAliBASE not found - MSA quality experiments will be skipped"
-    BALIBASE_AVAILABLE=0
-fi
-
-# --------------------------------------------------------------------------
-# ШАГ 3: Обучение нейросети (Stage 1 — синтетика)
-# --------------------------------------------------------------------------
-echo ""
-echo "=== STEP 3: Neural Network Training (Stage 1 - Synthetic) ==="
+echo "=== STEP 2: Neural Network Training ==="
 echo "Started: $(date)"
 
 python -m model.train \
@@ -327,59 +283,25 @@ python -m model.train \
     --cache_dir data/cache \
     --checkpoint_dir checkpoints \
     --epochs_pretrain 20 \
-    --epochs_finetune 0 \
     --batch_size 256 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
     --patience 5 \
     --device cuda \
     --results_dir results/training \
-    2>&1 | tee logs/training_stage1.log
+    2>&1 | tee logs/training.log
 
-echo "Stage 1 complete: $(date)"
-
-# --------------------------------------------------------------------------
-# ШАГ 4: Дообучение на BAliBASE (Stage 2 — если доступен)
-# --------------------------------------------------------------------------
-if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
-    echo ""
-    echo "=== STEP 4: Fine-tuning on BAliBASE (Stage 2) ==="
-    echo "Started: $(date)"
-
-    python -m model.train \
-        --data_dir data/processed \
-        --train_parquet $TRAIN_PARQUET \
-        --val_parquet data/processed/val.parquet \
-        --balibase_train data/balibase_train.json \
-        --balibase_val data/balibase_val.json \
-        --cache_dir data/cache \
-        --checkpoint_dir checkpoints \
-        --epochs_pretrain 0 \
-        --epochs_finetune 10 \
-        --lr 1e-4 \
-        --batch_size 128 \
-        --patience 5 \
-        --device cuda \
-        --resume checkpoints/best_model.pt \
-        --results_dir results/training \
-        2>&1 | tee logs/training_stage2.log
-
-    echo "Stage 2 complete: $(date)"
-else
-    echo ""
-    echo "=== STEP 4: Skipped (no BAliBASE) ==="
-fi
+echo "Training complete: $(date)"
 
 # --------------------------------------------------------------------------
-# ШАГ 5: Полный набор экспериментов
+# ШАГ 3: Полный набор экспериментов
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 5: Running All Experiments ==="
+echo "=== STEP 3: Running All Experiments ==="
 echo "Started: $(date)"
 
 python experiments/run_all.py \
     --checkpoint checkpoints/best_model.pt \
-    --balibase_test data/balibase_test.json \
     --results_dir results/experiments \
     --device cuda \
     2>&1 | tee logs/experiments.log
@@ -387,23 +309,22 @@ python experiments/run_all.py \
 echo "Experiments complete: $(date)"
 
 # --------------------------------------------------------------------------
-# ШАГ 6: Финальные тесты
+# ШАГ 4: Финальные тесты
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 6: Full Test Suite ==="
+echo "=== STEP 4: Full Test Suite ==="
 
 python -m pytest tests/ \
     -v --tb=short \
     --checkpoint checkpoints/best_model.pt \
-    --balibase_dir "$BALIBASE_DIR" \
     --json-report --json-report-file=results/tests/full_test_report.json \
     2>&1 | tee logs/test_full.log
 
 # --------------------------------------------------------------------------
-# ШАГ 7: Генерация итогового отчёта
+# ШАГ 5: Генерация итогового отчёта
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 7: Generating Final Report ==="
+echo "=== STEP 5: Generating Final Report ==="
 
 python results/interpret_results.py \
     --results_dir results \
@@ -493,7 +414,6 @@ echo "  Results: $LOCAL_DIR/results/"
 Запускать после обучения модели:
     python experiments/run_all.py \
         --checkpoint checkpoints/best_model.pt \
-        --balibase_test data/balibase_test.json \
         --results_dir results/experiments \
         --device cuda
 """
@@ -810,9 +730,9 @@ def exp_fr_hit_ratio() -> dict:
     }
 
 
-def exp_msa_quality(predictor, balibase_test: list) -> dict:
+def exp_msa_quality(predictor) -> dict:
     """
-    Эксперимент 5: качество MSA на BAliBASE (финальная таблица).
+    Эксперимент 5: качество MSA на синтетических ДНК (финальная таблица).
 
     Методы:
     1. ClustalW
@@ -848,8 +768,13 @@ def exp_msa_quality(predictor, balibase_test: list) -> dict:
             tracemalloc.stop()
             return {"sp": 0, "tc": 0, "time_s": 999, "mem_mb": 0, "ok": False, "error": str(e)}
 
-    # Ограничить до 30 групп для скорости
-    groups = balibase_test[:30]
+    # Generate synthetic DNA test groups
+    groups = []
+    import numpy as np
+    rng = np.random.RandomState(42)
+    for div in ['low', 'medium', 'high']:
+        for _ in range(10):
+            groups.append(_generate_dna_msa_group(rng, divergence=div))
 
     def fixed_msa(seqs, ids, hw=30):
         """MSA с фиксированным band — для ablation."""
@@ -964,7 +889,6 @@ def exp_scaling_by_n(predictor) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Run all MSA experiments")
     parser.add_argument("--checkpoint",    default="checkpoints/best_model.pt")
-    parser.add_argument("--balibase_test", default="data/balibase_test.json")
     parser.add_argument("--results_dir",   default="results/experiments")
     parser.add_argument("--device",        default="cuda")
     parser.add_argument("--skip",          nargs="*", default=[],
@@ -986,16 +910,6 @@ def main():
         predictor = None
         model_available = False
 
-    # Загрузить BAliBASE тест
-    balibase_test = []
-    if os.path.exists(args.balibase_test):
-        with open(args.balibase_test) as f:
-            balibase_test = json.load(f)
-        print(f"BAliBASE test: {len(balibase_test)} groups")
-        balibase_available = True
-    else:
-        print("WARNING: BAliBASE test data not found")
-        balibase_available = False
 
     # Запустить все эксперименты
     all_results = {}
@@ -1033,11 +947,11 @@ def main():
             args.results_dir
         )
 
-    # Эксперимент 5: качество MSA на BAliBASE
-    if "msa_quality" not in args.skip and balibase_available and model_available:
+    # Эксперимент 5: качество MSA
+    if "msa_quality" not in args.skip and model_available:
         all_results["msa_quality"] = run_experiment(
             "msa_quality",
-            lambda: exp_msa_quality(predictor, balibase_test),
+            lambda: exp_msa_quality(predictor),
             args.results_dir
         )
 
@@ -1290,7 +1204,7 @@ def generate_report(results_dir: str, output: str):
     lines.append("")
 
     # ---------- Эксперимент 5: качество MSA ----------
-    lines.append("## 6. Качество MSA на BAliBASE")
+    lines.append("## 6. Качество MSA")
     msa_q = load_json(os.path.join(exp_dir, "msa_quality.json"))
     if msa_q and msa_q.get("_status") == "OK":
         lines.append("")
@@ -1324,7 +1238,7 @@ def generate_report(results_dir: str, output: str):
             lines.append(f"*Детальные результаты: `{csv_path}`*")
     else:
         lines.append("")
-        lines.append("*Эксперимент пропущен (нет BAliBASE или модели)*")
+        lines.append("*Эксперимент пропущен (нет модели)*")
     lines.append("")
 
     # ---------- Эксперимент 6: масштабирование ----------
@@ -1482,7 +1396,7 @@ RULES:
   (never crash the full pipeline due to one failed experiment)
 - All output paths must be relative to project root
 - Shell scripts must use `set -e` and log everything to logs/
-- Python scripts must work with or without BAliBASE
+- Python scripts must handle missing data gracefully
   (skip gracefully if data not available)
 - results/FINAL_REPORT.md must be human-readable markdown
   that can be sent to Claude for interpretation
@@ -1491,9 +1405,6 @@ After generating, also update vastai_run.sh to call save_system_info.py
 at the very beginning (before any other steps).
 
 Important paths:
-- BAliBASE: data/raw/balibase/DATASET-BALiBASE/
-  - Aligned sequences/*.xml
-  - Unaligned sequences/*.tfa
 - Synthetic data: data/processed/train.parquet (50k, already exists)
 - Model checkpoint: checkpoints/best_model.pt
 - All results: results/experiments/*.json and *.csv

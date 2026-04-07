@@ -119,8 +119,8 @@ A mini training run was executed to verify the full pipeline end-to-end.
 
 | Test | Description | Result | Reason |
 |------|------------|--------|--------|
-| `test_full_comparison` | Compare MSA methods on BAliBASE | SKIPPED | BAliBASE not downloaded |
-| `test_our_method_competitive` | Our MSA vs baselines | SKIPPED | BAliBASE not downloaded |
+| `test_full_comparison` | Compare MSA methods on synthetic DNA | SKIPPED | No trained checkpoint |
+| `test_our_method_competitive` | Our MSA vs baselines | SKIPPED | No trained checkpoint |
 
 #### Neural vs Fixed Tests (`test_neural_vs_fixed.py`) — 0/2 PASSED, 2 SKIPPED
 
@@ -148,8 +148,7 @@ The 4 skipped tests will become runnable after vast.ai training:
 
 | Blocker | Tests Affected | Resolution |
 |---------|---------------|------------|
-| BAliBASE dataset not downloaded | `test_full_comparison`, `test_our_method_competitive` | Download BAliBASE v3.1, convert to parquet |
-| No trained checkpoint at default path | `test_ablation_study`, `test_neural_reduces_doublings` | Train on vast.ai → copy `checkpoints/best_model.pt` |
+| No trained checkpoint at default path | `test_full_comparison`, `test_our_method_competitive`, `test_ablation_study`, `test_neural_reduces_doublings` | Train on vast.ai → copy `checkpoints/best_model.pt` |
 
 ---
 
@@ -162,6 +161,6 @@ The 4 skipped tests will become runnable after vast.ai training:
 | Training loop | 3 epochs completed, loss decreasing, checkpoint saved |
 | Checkpoint loading | Verified, all fields present |
 | Test suite | **16/16 runnable tests PASSED** |
-| Skipped tests | 4 (expected — need BAliBASE + trained model) |
+| Skipped tests | 4 (expected — need trained model) |
 
 **Verdict: Pipeline is ready for vast.ai deployment.**

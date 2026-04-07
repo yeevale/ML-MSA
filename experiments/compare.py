@@ -1,4 +1,4 @@
-# experiments/compare.py — Full benchmark: compare all methods on BAliBASE.
+# experiments/compare.py — Full benchmark: compare all methods on synthetic DNA.
 # Generates final results CSV + plots for the thesis.
 #
 # Methods compared:
@@ -23,13 +23,13 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.loaders import BAliBASELoader
 from baselines.classical import run_mafft, run_muscle, run_clustalw
 from msa.progressive_msa import progressive_msa
 from msa.guide_tree import pairwise_distance_matrix, build_guide_tree, tree_levels, assign_node_ids
 from msa.iterative_refine import iterative_refine
 from scoring.metrics import sp_score, tc_score
 from model.evaluate import BandPredictorInference
+from experiments.run_all import _generate_dna_msa_group
 import aligner
 
 
@@ -147,19 +147,25 @@ def run_benchmark_single(aligner_fn: Callable, groups: list[dict]
     return pd.DataFrame(rows)
 
 
-def run_all(balibase_dir: str,
-            model_checkpoint: str,
+def run_all(model_checkpoint: str,
             output_dir: str,
             device: str = "cpu",
-            seq_type: str = "protein") -> None:
-    """Run all 7 methods on BAliBASE. Save results.csv + plots."""
+            seq_type: str = "dna") -> None:
+    """Run all 7 methods on synthetic DNA groups. Save results.csv + plots."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Load BAliBASE
-    loader = BAliBASELoader(balibase_dir)
-    _, _, test_groups = loader.train_val_test_split()
-    print(f"BAliBASE test set: {len(test_groups)} groups")
+    # Generate synthetic DNA test groups
+    rng = np.random.default_rng(2026)
+    test_groups = []
+    for div in ["low", "medium", "high"]:
+        for n_seqs in [5, 10, 20]:
+            for rep in range(3):
+                root_len = rng.integers(100, 400)
+                g = _generate_dna_msa_group(n_seqs, int(root_len), div, rng)
+                g["group_id"] = f"syn_{div}_{n_seqs}seqs_r{rep}"
+                test_groups.append(g)
+    print(f"Generated {len(test_groups)} synthetic DNA test groups")
 
     # Load neural predictor
     predictor = BandPredictorInference(model_checkpoint, device=device)
@@ -258,19 +264,17 @@ def run_all(balibase_dir: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Full benchmark comparison")
-    parser.add_argument("--balibase_dir", default="data/raw/balibase")
     parser.add_argument("--model_checkpoint", default="checkpoints/best_model.pt")
     parser.add_argument("--output_dir", default="results")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--seq_type", default="protein")
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
-        print("Usage: python -m experiments.compare --balibase_dir <path>")
+        print("Usage: python -m experiments.compare --model_checkpoint <path>")
         print("Smoke test: checking imports...")
         from baselines.classical import run_mafft
         from scoring.metrics import sp_score
         print("Imports OK. Smoke test passed!")
     else:
-        run_all(args.balibase_dir, args.model_checkpoint,
-                args.output_dir, args.device, args.seq_type)
+        run_all(args.model_checkpoint,
+                args.output_dir, args.device)

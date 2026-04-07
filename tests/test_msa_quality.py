@@ -1,6 +1,5 @@
-# tests/test_msa_quality.py — Final BAliBASE comparison: SP-score and time.
-# Run after full neural network training.
-# Generates the final comparison table for the thesis.
+# tests/test_msa_quality.py — MSA quality comparison: SP-score and time.
+# Uses synthetic DNA groups with known true alignments.
 # Run: pytest tests/test_msa_quality.py -v -s
 
 import sys
@@ -10,30 +9,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from data.loaders import BAliBASELoader
 from baselines.classical import run_mafft, run_muscle, run_clustalw
 from msa.progressive_msa import progressive_msa
 from msa.guide_tree import pairwise_distance_matrix, build_guide_tree, tree_levels, assign_node_ids
 from msa.iterative_refine import iterative_refine
 from scoring.metrics import sp_score, tc_score
 from model.evaluate import BandPredictorInference
+from experiments.run_all import _generate_dna_msa_group
 import aligner
 
-BALIBASE_DIR = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "balibase" / "DATASET-BALiBASE")
 CHECKPOINT = str(Path(__file__).resolve().parent.parent / "checkpoints" / "best_model.pt")
 
 
 @pytest.fixture(scope="module")
-def balibase_test():
-    """Load BAliBASE test set. Skip if not found."""
-    if not Path(BALIBASE_DIR).exists():
-        pytest.skip(f"BAliBASE not found: {BALIBASE_DIR}")
-    loader = BAliBASELoader(BALIBASE_DIR)
-    _, _, test = loader.train_val_test_split()
-    return test[:30]  # first 30 groups for speed
+def dna_test_groups():
+    """Generate synthetic DNA test groups with known true alignments."""
+    rng = np.random.default_rng(12345)
+    groups = []
+    for div in ["low", "medium", "high"]:
+        for n_seqs in [5, 10]:
+            g = _generate_dna_msa_group(n_seqs, rng.integers(100, 300), div, rng)
+            g["group_id"] = f"syn_{div}_{n_seqs}seqs"
+            groups.append(g)
+    return groups
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +52,7 @@ def fixed_band_msa(sequences: list[str], seq_ids: list[str],
     if len(sequences) < 2:
         return sequences
 
-    dist_mat = pairwise_distance_matrix(sequences, "protein")
+    dist_mat = pairwise_distance_matrix(sequences, "dna")
     tree = build_guide_tree(dist_mat, method="upgma")
     assign_node_ids(tree)
     levels = tree_levels(tree)
@@ -145,9 +147,9 @@ def run_benchmark(aligner_fn, groups: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_full_comparison(balibase_test, predictor) -> None:
-    """Final comparison table of all methods on BAliBASE (5 groups for speed)."""
-    groups = balibase_test[:5]
+def test_full_comparison(dna_test_groups, predictor) -> None:
+    """Final comparison table of all methods on synthetic DNA (5 groups for speed)."""
+    groups = dna_test_groups[:5]
     methods = {
         "ClustalW": lambda s, ids: run_clustalw(s, ids),
         "MAFFT": lambda s, ids: run_mafft(s, ids),
@@ -155,10 +157,10 @@ def test_full_comparison(balibase_test, predictor) -> None:
         "Fixed_W30": lambda s, ids: fixed_band_msa(s, ids, 30),
         "Fixed_W100": lambda s, ids: fixed_band_msa(s, ids, 100),
         "Neural_band": lambda s, ids: progressive_msa(
-            s, ids, predictor, seq_type="protein"),
+            s, ids, predictor, seq_type="dna"),
         "Neural_+_refine": lambda s, ids: iterative_refine(
-            progressive_msa(s, ids, predictor, seq_type="protein"),
-            s, predictor, seq_type="protein"),
+            progressive_msa(s, ids, predictor, seq_type="dna"),
+            s, predictor, seq_type="dna"),
     }
 
     all_results: dict[str, pd.DataFrame] = {}
@@ -174,7 +176,7 @@ def test_full_comparison(balibase_test, predictor) -> None:
 
     # Skip if no valid results
     if all(df.empty for df in all_results.values()):
-        pytest.skip("No BAliBASE groups with valid reference alignments")
+        pytest.skip("No groups with valid reference alignments")
 
     # Summary table
     summary = pd.DataFrame({
@@ -192,15 +194,15 @@ def test_full_comparison(balibase_test, predictor) -> None:
     print(summary.to_string())
 
 
-def test_our_method_competitive(balibase_test, predictor) -> None:
-    """Our neural band method should have reasonable SP-score."""
+def test_our_method_competitive(dna_test_groups, predictor) -> None:
+    """Our neural band method should have reasonable SP-score on DNA."""
     df = run_benchmark(
         lambda s, ids: progressive_msa(
-            s, ids, predictor, seq_type="protein"),
-        balibase_test[:5]
+            s, ids, predictor, seq_type="dna"),
+        dna_test_groups[:5]
     )
     if df.empty:
-        pytest.skip("No BAliBASE groups with valid reference alignments found")
+        pytest.skip("No groups with valid reference alignments found")
     mean_sp = df.sp.mean()
     print(f"\nOur method mean SP: {mean_sp:.3f}")
     assert mean_sp > 0.1, f"SP-score too low: {mean_sp:.3f}"
@@ -209,13 +211,11 @@ def test_our_method_competitive(balibase_test, predictor) -> None:
 if __name__ == "__main__":
     print("Smoke test: test_msa_quality.py")
     print("Checking imports...")
-    from data.loaders import BAliBASELoader
     from baselines.classical import run_mafft
     from scoring.metrics import sp_score, tc_score
     from model.evaluate import BandPredictorInference
+    from experiments.run_all import _generate_dna_msa_group
     print("All imports OK.")
-    if not Path(BALIBASE_DIR).exists():
-        print(f"BAliBASE not found at {BALIBASE_DIR} (expected before download)")
     if not Path(CHECKPOINT).exists():
         print(f"Checkpoint not found at {CHECKPOINT} (expected before training)")
     print("Smoke test passed!")

@@ -1,6 +1,5 @@
-# model/train.py — Two-stage training loop for the band predictor.
-#   Stage 1 (pretrain):  synthetic data only
-#   Stage 2 (finetune):  synthetic 80% + BAliBASE 20%
+# model/train.py — Training loop for the band predictor.
+#   Single-stage training on synthetic data.
 # Features are precomputed and cached → 5-10× speedup.
 # WeightedRandomSampler balances low/medium/high divergence.
 # Best model selected by val band_recall@1x (fraction without doubling).
@@ -15,7 +14,7 @@ from multiprocessing import Pool
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, ConcatDataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -245,15 +244,14 @@ def evaluate(model: BandPredictor, loader: DataLoader,
 # ---------------------------------------------------------------------------
 
 def train(config: dict) -> None:
-    """Full two-stage training loop.
+    """Training loop.
 
     config keys:
       data_dir, cache_dir, checkpoint_dir, results_dir
       train_parquet (optional, explicit path to train file)
-      balibase_parquet (optional, for stage 2)
-      epochs_pretrain=20, epochs_finetune=10
+      epochs_pretrain=20
       batch_size=128, lr=1e-3, weight_decay=1e-4
-      lam=2.0, penalty=5.0
+      lam=4.0, penalty=15.0
       patience=5  (early stopping)
       wandb_project, wandb_run_name (optional)
       device='cuda'
@@ -267,7 +265,6 @@ def train(config: dict) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     epochs_pre = config.get("epochs_pretrain", 20)
-    epochs_ft = config.get("epochs_finetune", 10)
     batch_size = config.get("batch_size", 128)
     num_workers = config.get("num_workers", min(8, os.cpu_count() or 1))
     lr = config.get("lr", 1e-3)
@@ -374,7 +371,7 @@ def train(config: dict) -> None:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs_pre + epochs_ft)
+        optimizer, T_max=epochs_pre)
 
     best_val_loss = float("inf")
     best_recall = -1.0
@@ -444,42 +441,9 @@ def train(config: dict) -> None:
 
         return start_epoch + n_epochs
 
-    # Stage 1: pretrain on synthetic data
-    print(f"=== Stage 1: Pretrain ({epochs_pre} epochs) ===")
-    next_epoch = run_stage(epochs_pre, "pretrain", 0)
-
-    # Stage 2: finetune with BAliBASE (if available)
-    balibase_path = config.get("balibase_parquet")
-    if balibase_path and Path(balibase_path).exists():
-        print(f"\n=== Stage 2: Finetune ({epochs_ft} epochs) ===")
-        # Mix synthetic 80% + BAliBASE 20%
-        balibase_ds = BandDataset([balibase_path],
-                                  str(cache_dir / "balibase"))
-        combined_ds = ConcatDataset([train_ds, balibase_ds])
-
-        # Recompute sampler weights
-        n_syn = len(train_ds)
-        n_bal = len(balibase_ds)
-        w_syn = torch.full((n_syn,), 0.8 / max(n_syn, 1))
-        w_bal = torch.full((n_bal,), 0.2 / max(n_bal, 1))
-        combined_weights = torch.cat([w_syn, w_bal])
-        combined_sampler = WeightedRandomSampler(
-            combined_weights, len(combined_weights), replacement=True)
-
-        train_loader = DataLoader(combined_ds, batch_size=batch_size,
-                                  sampler=combined_sampler, num_workers=num_workers,
-                                  pin_memory=(device != "cpu"),
-                                  persistent_workers=(num_workers > 0))
-
-        # Lower LR for finetuning
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr * 0.1
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs_ft)
-
-        run_stage(epochs_ft, "finetune", next_epoch)
-    else:
-        print("\nNo BAliBASE parquet found, skipping Stage 2")
+    # Training
+    print(f"=== Training ({epochs_pre} epochs) ===")
+    run_stage(epochs_pre, "train", 0)
 
     if use_wandb:
         import wandb
@@ -511,9 +475,7 @@ if __name__ == "__main__":
     parser.add_argument("--cache_dir", default="data/cache")
     parser.add_argument("--checkpoint_dir", default="checkpoints")
     parser.add_argument("--results_dir", default="results/training")
-    parser.add_argument("--balibase_parquet", default=None)
     parser.add_argument("--epochs_pretrain", type=int, default=20)
-    parser.add_argument("--epochs_finetune", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -560,7 +522,6 @@ if __name__ == "__main__":
                 "cache_dir": os.path.join(tmpdir, "cache"),
                 "checkpoint_dir": os.path.join(tmpdir, "ckpt"),
                 "epochs_pretrain": 2,
-                "epochs_finetune": 0,
                 "batch_size": 8,
                 "lr": 1e-3,
                 "weight_decay": 0,

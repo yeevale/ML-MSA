@@ -4,7 +4,6 @@ Unified entry point for all experiments.
 Run after training:
     python experiments/run_all.py \
         --checkpoint checkpoints/best_model.pt \
-        --balibase_dir data/raw/balibase/DATASET-BALiBASE \
         --results_dir results/experiments \
         --device cuda
 """
@@ -461,16 +460,14 @@ def _generate_dna_msa_group(n_seqs: int, root_len: int, divergence: str,
     }
 
 
-def exp_msa_quality_dna(predictor, results_dir: str) -> dict:
+def exp_msa_quality(predictor, results_dir: str) -> dict:
     """
-    Experiment 5b: MSA quality on synthetic DNA data.
+    Experiment 5: MSA quality on synthetic DNA data.
 
     Generates groups of DNA sequences with known true alignments from
-    a shared root ancestor. Compares the same 7 methods as exp_msa_quality
-    but on DNA (the domain the neural model was trained on), eliminating
-    BAliBASE domain shift.
+    a shared root ancestor. Compares all 7 methods.
 
-    Groups: 30 total (10 per divergence level × 3 group sizes).
+    Groups: 36 total (3 divergence levels × 3 group sizes × 4 replicates).
     """
     import tracemalloc
     from msa.progressive_msa import progressive_msa
@@ -593,239 +590,9 @@ def exp_msa_quality_dna(predictor, results_dir: str) -> dict:
                 print(f"    {g['group_id']}: ERROR: {r.get('error', 'unknown')}")
 
     df = pd.DataFrame(all_rows)
-    detail_csv = os.path.join(results_dir, "msa_quality_dna_detail.csv")
-    df.to_csv(detail_csv, index=False)
-
-    summary_data = {}
-    if len(df[df["ok"]]) > 0:
-        summary = df[df["ok"]].groupby("method").agg(
-            SP_mean=("sp", "mean"),
-            TC_mean=("tc", "mean"),
-            Time_mean=("time_s", "mean"),
-            Mem_MB_mean=("mem_mb", "mean"),
-        ).round(4)
-        summary_csv = os.path.join(results_dir, "msa_quality_dna_summary.csv")
-        summary.to_csv(summary_csv)
-        summary_data = summary.to_dict()
-        print("\n  Summary (DNA):")
-        print(summary.to_string())
-
-        # Per-divergence breakdown
-        by_div = df[df["ok"]].groupby(["divergence", "method"]).agg(
-            SP_mean=("sp", "mean"),
-            TC_mean=("tc", "mean"),
-        ).round(4)
-        div_csv = os.path.join(results_dir, "msa_quality_dna_by_divergence.csv")
-        by_div.to_csv(div_csv)
-        print("\n  By divergence:")
-        print(by_div.to_string())
-
-    return {
-        "summary": summary_data,
-        "n_groups": len(groups),
-        "detail_csv": detail_csv,
-    }
-
-
-def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
-    """
-    Experiment 5: MSA quality on BAliBASE.
-
-    Methods:
-    1. MAFFT
-    2. MUSCLE
-    3. ClustalW
-    4. Fixed band W=30 (direct aligner, no progressive MSA — ablation)
-    5. Fixed band W=100 (direct aligner — ablation)
-    6. Neural band (our method)
-    7. Neural band + iterative refinement
-
-    Metrics: SP-score, TC-score, time, memory.
-    """
-    import tracemalloc
-    from msa.progressive_msa import progressive_msa
-    from msa.iterative_refine import iterative_refine
-    from baselines.classical import run_mafft, run_muscle, run_clustalw
-    from scoring.metrics import sp_score, tc_score
-
-    def measure(fn, seqs, ids, ref):
-        """Measure SP, TC, time and memory for an MSA method."""
-        tracemalloc.start()
-        t0 = time.perf_counter()
-        try:
-            msa_result = fn(seqs, ids)
-            elapsed = time.perf_counter() - t0
-            _, peak_mem = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-
-            # Validate predicted MSA
-            if not msa_result or not all(isinstance(s, str) for s in msa_result):
-                return {"sp": 0, "tc": 0, "time_s": round(elapsed, 3),
-                        "mem_mb": round(peak_mem / 1e6, 2), "ok": False,
-                        "error": "MSA result is empty or not strings"}
-
-            # Validate and score
-            ref_valid = (ref is not None
-                         and len(ref) > 0
-                         and all(isinstance(s, str) for s in ref)
-                         and all(len(s) == len(ref[0]) for s in ref)
-                         and any('-' in s for s in ref))  # must have gaps
-            if ref_valid and len(ref) == len(msa_result):
-                # --- DIAGNOSTIC (Problem 1) ---
-                ref_ug = [s.replace('-', '').upper() for s in ref]
-                pred_ug = [s.replace('-', '').upper() for s in msa_result]
-                n_match = sum(1 for r in ref_ug if r in pred_ug)
-                if n_match < len(ref):
-                    print(f"  [MEASURE DIAG] ref has {len(ref)} seqs, only {n_match} found in pred")
-                    print(f"    ref  ungapped lens: {[len(s) for s in ref_ug[:5]]}")
-                    print(f"    pred ungapped lens: {[len(s) for s in pred_ug[:5]]}")
-                # --- END DIAGNOSTIC ---
-                sp = sp_score(msa_result, ref)
-                tc = tc_score(msa_result, ref)
-            else:
-                sp = -1.0
-                tc = -1.0
-            return {"sp": round(sp, 4), "tc": round(tc, 4),
-                    "time_s": round(elapsed, 3), "mem_mb": round(peak_mem / 1e6, 2), "ok": True}
-        except Exception as e:
-            tracemalloc.stop()
-            return {"sp": 0, "tc": 0, "time_s": 999, "mem_mb": 0,
-                    "ok": False, "error": str(e)}
-
-    # Limit to 30 groups for speed
-    groups = balibase_groups[:30]
-
-    # Detect seq_type: BAliBASE is mostly protein
-    def _detect_seq_type(seqs: list[str]) -> str:
-        sample = "".join(s[:100] for s in seqs[:5]).upper()
-        non_dna = sum(1 for c in sample if c not in "ACGTNU-")
-        return "protein" if non_dna > len(sample) * 0.1 else "dna"
-
-    # For fixed-band experiments, use aligner directly with pairwise alignment
-    # (this is an ablation baseline — not full progressive MSA)
-    import aligner
-
-    def fixed_band_pairwise(seqs, ids, hw=30):
-        """Simple pairwise-based MSA with fixed band (ablation only for pairs)."""
-        if len(seqs) <= 1:
-            return seqs
-        st = _detect_seq_type(seqs)
-        class FixedPredictor:
-            def predict_single(self, s1, s2, seq_type="dna"):
-                return (0, hw)
-            def predict_batch(self, pairs, seq_type="dna"):
-                return [(0, hw) for _ in pairs]
-        return progressive_msa(seqs, ids, FixedPredictor(), seq_type=st)
-
-    # --- DIAGNOSTIC RUN ---
-    # Find first group with a valid reference
-    first_group = None
-    for _g in groups:
-        if _g.get("reference") is not None and len(_g["reference"]) > 0:
-            first_group = _g
-            break
-
-    if first_group is not None:
-        import subprocess, tempfile, os as _os
-        from Bio import SeqIO
-        from io import StringIO
-
-        _diag_seqs = first_group["sequences"]
-        _diag_ref  = first_group["reference"]
-        _diag_ids  = first_group["seq_ids"]
-
-        _fasta_in = "\n".join(f">{_diag_ids[i]}\n{_diag_seqs[i]}" for i in range(len(_diag_seqs)))
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta',
-                                         delete=False) as _f:
-            _f.write(_fasta_in)
-            _tmp_in = _f.name
-
-        _result = subprocess.run(
-            ["mafft", "--auto", "--quiet", _tmp_in],
-            capture_output=True, text=True
-        )
-        _mafft_output = _result.stdout
-
-        _records = list(SeqIO.parse(StringIO(_mafft_output), "fasta"))
-        _predicted = [str(r.seq).upper() for r in _records]
-        _pred_ids  = [r.id for r in _records]
-
-        print("="*60)
-        print(f"GROUP: {first_group['group_id']}")
-        print(f"N sequences: {len(_diag_seqs)}")
-        print(f"Reference sequences: {len(_diag_ref)}")
-        print(f"Predicted sequences: {len(_predicted)}")
-        print(f"Ref seq IDs:  {first_group['seq_ids'][:3]}")
-        print(f"Pred seq IDs: {_pred_ids[:3]}")
-        print(f"Ref lengths (unique):  {sorted(set(len(s) for s in _diag_ref))}")
-        print(f"Pred lengths (unique): {sorted(set(len(s) for s in _predicted))}")
-        print(f"Ref[0][:80]:  {_diag_ref[0][:80]}")
-        print(f"Pred[0][:80]: {_predicted[0][:80]}")
-        print(f"Ref gaps:  {[s.count('-') for s in _diag_ref]}")
-        print(f"Pred gaps: {[s.count('-') for s in _predicted]}")
-        print("="*60)
-        _os.unlink(_tmp_in)
-    else:
-        print("DIAGNOSTIC: No group with valid reference found!")
-    # --- END DIAGNOSTIC ---
-
-    methods = {}
-
-    # Classical baselines (may fail if tools not installed)
-    try:
-        from baselines.classical import run_mafft
-        methods["MAFFT"] = lambda s, ids: run_mafft(s, ids)
-    except Exception:
-        pass
-    try:
-        from baselines.classical import run_muscle
-        methods["MUSCLE"] = lambda s, ids: run_muscle(s, ids)
-    except Exception:
-        pass
-    try:
-        from baselines.classical import run_clustalw
-        methods["ClustalW"] = lambda s, ids: run_clustalw(s, ids)
-    except Exception:
-        pass
-
-    # Fixed band ablations
-    methods["Fixed_W30"]  = lambda s, ids: fixed_band_pairwise(s, ids, hw=30)
-    methods["Fixed_W100"] = lambda s, ids: fixed_band_pairwise(s, ids, hw=100)
-
-    # Neural methods (auto-detect seq_type per group)
-    def neural_band(s, ids):
-        st = _detect_seq_type(s)
-        return progressive_msa(s, ids, predictor, seq_type=st)
-
-    def neural_refine(s, ids):
-        st = _detect_seq_type(s)
-        msa = progressive_msa(s, ids, predictor, seq_type=st)
-        return iterative_refine(msa, s, predictor)
-
-    methods["Neural_band"]     = neural_band
-    methods["Neural_+_refine"] = neural_refine
-
-    all_rows = []
-    for method_name, method_fn in methods.items():
-        print(f"\n  Running {method_name}...")
-        for g in groups:
-            r = measure(method_fn, g["sequences"], g["seq_ids"], g["reference"])
-            r["method"] = method_name
-            r["group_id"] = g["group_id"]
-            r["ref_class"] = g.get("ref_class", "")
-            r["n_seqs"] = len(g["sequences"])
-            all_rows.append(r)
-            if r["ok"]:
-                print(f"    {g['group_id']}: SP={r['sp']:.3f}, TC={r['tc']:.3f}, "
-                      f"t={r['time_s']:.2f}s")
-            else:
-                print(f"    {g['group_id']}: ERROR: {r.get('error', 'unknown')}")
-
-    df = pd.DataFrame(all_rows)
     detail_csv = os.path.join(results_dir, "msa_quality_detail.csv")
     df.to_csv(detail_csv, index=False)
 
-    # Summary table
     summary_data = {}
     if len(df[df["ok"]]) > 0:
         summary = df[df["ok"]].groupby("method").agg(
@@ -840,11 +607,22 @@ def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
         print("\n  Summary:")
         print(summary.to_string())
 
+        # Per-divergence breakdown
+        by_div = df[df["ok"]].groupby(["divergence", "method"]).agg(
+            SP_mean=("sp", "mean"),
+            TC_mean=("tc", "mean"),
+        ).round(4)
+        div_csv = os.path.join(results_dir, "msa_quality_by_divergence.csv")
+        by_div.to_csv(div_csv)
+        print("\n  By divergence:")
+        print(by_div.to_string())
+
     return {
         "summary": summary_data,
         "n_groups": len(groups),
         "detail_csv": detail_csv,
     }
+
 
 
 def exp_scaling_by_n(predictor, results_dir: str) -> dict:
@@ -911,8 +689,6 @@ def exp_scaling_by_n(predictor, results_dir: str) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Run all MSA experiments")
     parser.add_argument("--checkpoint",    default="checkpoints/best_model.pt")
-    parser.add_argument("--balibase_dir",  default=None,
-                        help="Path to DATASET-BALiBASE directory")
     parser.add_argument("--results_dir",   default="results/experiments")
     parser.add_argument("--device",        default="cuda")
     parser.add_argument("--skip",          nargs="*", default=[],
@@ -933,24 +709,6 @@ def main():
     except Exception as e:
         print(f"WARNING: Could not load model: {e}")
         print("Experiments requiring neural network will be skipped")
-
-    # Load BAliBASE data
-    balibase_groups = []
-    balibase_available = False
-    if args.balibase_dir and os.path.isdir(args.balibase_dir):
-        try:
-            from data.loaders import BAliBASELoader
-            loader = BAliBASELoader(args.balibase_dir)
-            all_groups = loader.load_all()
-            _, _, balibase_groups = loader.train_val_test_split()
-            if not balibase_groups:
-                balibase_groups = all_groups[:30]
-            print(f"BAliBASE test: {len(balibase_groups)} groups")
-            balibase_available = True
-        except Exception as e:
-            print(f"WARNING: Could not load BAliBASE: {e}")
-    else:
-        print("BAliBASE directory not provided or not found - MSA quality experiment skipped")
 
     # Run all experiments
     all_results = {}
@@ -990,19 +748,11 @@ def main():
             args.results_dir
         )
 
-    # Experiment 5: MSA quality on BAliBASE (needs model + BAliBASE)
-    if "msa_quality" not in args.skip and model_available and balibase_available:
+    # Experiment 5: MSA quality on synthetic DNA (needs model)
+    if "msa_quality" not in args.skip and model_available:
         all_results["msa_quality"] = run_experiment(
             "msa_quality",
-            lambda: exp_msa_quality(predictor, balibase_groups, args.results_dir),
-            args.results_dir
-        )
-
-    # Experiment 5b: MSA quality on synthetic DNA (needs model, no BAliBASE needed)
-    if "msa_quality_dna" not in args.skip and model_available:
-        all_results["msa_quality_dna"] = run_experiment(
-            "msa_quality_dna",
-            lambda: exp_msa_quality_dna(predictor, args.results_dir),
+            lambda: exp_msa_quality(predictor, args.results_dir),
             args.results_dir
         )
 

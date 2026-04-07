@@ -126,15 +126,7 @@ if [ -f "data/processed/val.parquet" ]; then
     echo "  Synthetic val: $VAL_SIZE samples"
 fi
 
-# BAliBASE
-if [ -d "data/raw/balibase/DATASET-BALiBASE" ]; then
-    BALI_ALIGNED=$(ls data/raw/balibase/DATASET-BALiBASE/Aligned\ sequences/*.xml 2>/dev/null | wc -l)
-    BALI_UNALIGNED=$(ls data/raw/balibase/DATASET-BALiBASE/Unaligned\ sequences/*.tfa 2>/dev/null | wc -l)
-    echo "  BAliBASE: $BALI_ALIGNED aligned, $BALI_UNALIGNED unaligned groups"
-else
-    echo "  WARNING: BAliBASE not found at data/raw/balibase/DATASET-BALiBASE"
-    echo "  MSA quality tests will be skipped"
-fi
+# Data check complete
 
 # --------------------------------------------------------------------------
 # 6. Quick import checks

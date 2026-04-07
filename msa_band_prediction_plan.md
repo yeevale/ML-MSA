@@ -107,7 +107,7 @@ msa_band_neural/
 ├── data/
 │   ├── simulate.py       # генератор синтетики → .parquet
 │   │   └── uses: full_nw (C++)
-│   └── loaders.py        # BAliBASE loader
+│   └── loaders.py        # FASTA file loaders
 │
 ├── features/
 │   ├── kmer.py           # kmer_features(seq1, seq2) → np.ndarray(70,)
@@ -269,7 +269,7 @@ profile = build_profile(aligned_seqs, seq_type="dna")
 # Этот модуль генерирует обучающие данные для нейросети.
 # Нейросеть учится предсказывать band по паре последовательностей.
 # Для обучения нужно знать ТОЧНЫЙ оптимальный путь NW → вычисляем через full_nw.
-# Синтетика нужна потому что реальные датасеты (BAliBASE) не содержат пути DP.
+# Синтетика нужна потому что нужно знать точный путь выравнивания.
 #
 # ВЫХОД: .parquet файлы с колонками:
 #   seq1 (str), seq2 (str), centre_diag (int), true_half_width (int),
@@ -346,49 +346,19 @@ def generate_dataset(n_samples: int, output_path: str,
 
 ```python
 # КОНТЕКСТ ДЛЯ COPILOT:
-# BAliBASE 3.0 — стандартный benchmark для MSA.
-# Структура: папки RV11..RV50, каждая содержит .tfa файлы.
-# .tfa = FASTA формат с гэпами (эталонное выравнивание).
-# Нам нужны: sequences (без гэпов) для входа в наш алгоритм,
-#             reference (с гэпами) для вычисления SP/TC-score.
-# Split: RV11-RV30 → train, RV40 → val, RV50 → test.
+# FASTA file loaders — вспомогательные функции для чтения FASTA файлов.
 
-from Bio import SeqIO, AlignIO
 from pathlib import Path
-from tqdm import tqdm
 
 def load_fasta(path: str) -> list[tuple[str, str]]:
-    """Парсить .fasta/.tfa через BioPython.
+    """Парсить .fasta/.tfa.
     Возвращает list[(header: str, sequence_without_gaps: str)]."""
     ...
 
-class BAliBASELoader:
-    def __init__(self, data_dir: str, max_seq_len: int = 2000,
-                 max_num_seqs: int = 50):
-        """data_dir: путь к распакованному BAliBASE 3.0.
-        Фильтровать группы с последовательностями длиннее max_seq_len
-        или количеством > max_num_seqs."""
-        self.data_dir = Path(data_dir)
-        ...
-
-    def load_group(self, tfa_path: Path) -> dict:
-        """Загрузить одну группу из .tfa файла.
-        Возвращает:
-          {'group_id': str,       # например 'RV11/BB11001'
-           'ref_class': str,      # 'RV11', 'RV12', ...
-           'sequences': list[str], # без гэпов
-           'seq_ids': list[str],
-           'reference': list[str]} # с гэпами '-'"""
-        ...
-
-    def load_all(self, ref_classes: list[str] | None = None) -> list[dict]:
-        """Загрузить все группы. Если ref_classes задан — фильтровать.
-        tqdm прогресс-бар."""
-        ...
-
-    def train_val_test_split(self) -> tuple[list[dict], list[dict], list[dict]]:
-        """RV11+RV12+RV20+RV30 → train, RV40 → val, RV50 → test."""
-        ...
+def load_fasta_with_gaps(path: str) -> list[tuple[str, str]]:
+    """Парсить .fasta/.tfa, сохраняя гэпы.
+    Возвращает list[(header: str, sequence_with_gaps: str)]."""
+    ...
 ```
 
 ---
@@ -775,9 +745,8 @@ def band_loss(pred: torch.Tensor,
 
 ```python
 # КОНТЕКСТ ДЛЯ COPILOT:
-# Двухэтапное обучение:
-#   Этап 1 (20 эпох): только синтетические данные из simulate.py
-#   Этап 2 (10 эпох): синтетика 80% + BAliBASE 20%
+# Одноэтапное обучение:
+#   Этап 1 (20 эпох): синтетические данные (ДНК + белки) из simulate.py
 # Признаки предвычислить и кешировать → ускоряет обучение в 5-10x.
 # WeightedRandomSampler → балансировка между low/medium/high дивергенцией.
 # Метрика выбора лучшей модели: val band_recall@1x (доля без doubling).
@@ -842,8 +811,7 @@ def train(config: dict):
 
     config keys:
       data_dir, cache_dir, checkpoint_dir
-      balibase_dir (для этапа 2)
-      epochs_pretrain=20, epochs_finetune=10
+      epochs_pretrain=20
       batch_size=128, lr=1e-3, weight_decay=1e-4
       lam=2.0, penalty=5.0
       patience=5  (early stopping)
@@ -1626,7 +1594,7 @@ def band_recall_at(pred_hws: np.ndarray,
 
 ```python
 # КОНТЕКСТ ДЛЯ COPILOT:
-# Стандартные метрики качества MSA из BAliBASE benchmark.
+# Стандартные метрики качества MSA.
 # SP-score и TC-score вычисляются относительно эталонного выравнивания.
 # sp_score_internal — для итеративного уточнения (без эталона).
 
@@ -1635,7 +1603,7 @@ import time, tracemalloc
 from tqdm import tqdm
 
 def sp_score(predicted_msa: list[str], reference_msa: list[str]) -> float:
-    """Sum-of-Pairs score (BAliBASE стандарт).
+    """Sum-of-Pairs score.
     Для каждой пары последовательностей (i, j):
       Для каждой позиции k в эталоне:
         Если pred_msa[i][k] != '-' AND pred_msa[j][k] != '-':
@@ -1716,7 +1684,7 @@ def run_clustalw(sequences: list[str], ids: list[str] | None = None) -> list[str
 
 ```python
 # КОНТЕКСТ ДЛЯ COPILOT:
-# Финальный бенчмарк: сравнить все методы на BAliBASE.
+# Финальный бенчмарк: сравнить все методы на синтетических ДНК-группах.
 # ВАЖНО: ablation study с фиксированными band (W=30, W=100) обязателен —
 #         он доказывает что улучшение от нейросети, а не от banded подхода.
 #
@@ -1735,7 +1703,7 @@ def run_clustalw(sequences: list[str], ids: list[str] | None = None) -> list[str
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from data.loaders import BAliBASELoader
+from experiments.run_all import _generate_dna_msa_group
 from baselines.classical import run_mafft, run_muscle, run_clustalw
 from msa.progressive_msa import progressive_msa
 from msa.iterative_refine import iterative_refine
@@ -1751,12 +1719,10 @@ def fixed_band_aligner(sequences: list[str], seq_ids: list[str],
     Используется для ablation study."""
     ...
 
-def run_all(balibase_dir: str,
-            model_checkpoint: str,
+def run_all(model_checkpoint: str,
             output_dir: str,
-            device: str = "cuda",
-            seq_type: str = "protein"):
-    """Запустить все 7 методов на всём BAliBASE.
+            device: str = "cuda"):
+    """Запустить все 7 методов на синтетических ДНК-группах.
     Сохранить results.csv в output_dir.
     Построить и сохранить графики."""
     ...
@@ -1880,31 +1846,25 @@ cd ..
 wget https://www.ncbi.nlm.nih.gov/Class/BLAST/BLOSUM/BLOSUM62.txt \
      -O data/blosum62.txt
 
-# 4. Скачать BAliBASE 3.0
-# http://www.lbgi.fr/balibase/ → распаковать в data/raw/balibase/
-
-# 5. Сгенерировать обучающие данные
+# 4. Сгенерировать обучающие данные
 python -m data.simulate --n_samples 500000 --seq_type dna \
        --output data/processed/train_dna.parquet --n_workers 16
 python -m data.simulate --n_samples 200000 --seq_type protein \
        --output data/processed/train_protein.parquet --n_workers 16
 
-# 6. Предвычислить признаки (опционально, ускоряет обучение)
+# 5. Предвычислить признаки (опционально, ускоряет обучение)
 python -m model.train precompute --data_dir data/processed/ \
        --cache_dir data/cache/ --n_workers 8
 
-# 7. Обучить нейросеть
+# 6. Обучить нейросеть
 python -m model.train train \
        --data_dir data/processed/ \
        --cache_dir data/cache/ \
-       --balibase_dir data/raw/balibase/ \
        --checkpoint_dir checkpoints/ \
-       --device cuda \
-       --wandb_project msa_band_neural
+       --device cuda
 
-# 8. Финальный бенчмарк
+# 7. Финальный бенчмарк
 python -m experiments.compare \
-       --balibase_dir data/raw/balibase/ \
        --model_checkpoint checkpoints/best.pt \
        --output_dir results/ \
        --device cuda
@@ -2325,14 +2285,14 @@ def test_ablation_study(predictor):
 
 ```python
 # КОНТЕКСТ ДЛЯ COPILOT:
-# Финальный тест на BAliBASE: сравнение SP-score и времени.
+# Финальный тест на синтетических ДНК: сравнение SP-score и времени.
 # Запускать после полного обучения нейросети.
 # Генерирует финальную таблицу для диссертации.
 
 import time
 import pandas as pd
 import pytest
-from data.loaders import BAliBASELoader
+from experiments.run_all import _generate_dna_msa_group
 from baselines.classical import run_mafft, run_muscle, run_clustalw
 from msa.progressive_msa import progressive_msa
 from msa.iterative_refine import iterative_refine
@@ -2340,14 +2300,17 @@ from scoring.metrics import sp_score, tc_score
 from model.evaluate import BandPredictorInference
 import aligner
 
-BALIBASE_DIR = "data/raw/balibase"
 CHECKPOINT   = "checkpoints/best.pt"
 
 @pytest.fixture(scope="module")
-def balibase_test():
-    loader = BAliBASELoader(BALIBASE_DIR)
-    _, _, test = loader.train_val_test_split()
-    return test[:30]  # первые 30 групп для скорости
+def dna_test_groups():
+    import numpy as np
+    rng = np.random.RandomState(42)
+    groups = []
+    for div in ['low', 'medium', 'high']:
+        for _ in range(3):
+            groups.append(_generate_dna_msa_group(rng, divergence=div))
+    return groups
 
 @pytest.fixture(scope="module")
 def predictor():
@@ -2376,7 +2339,7 @@ def run_benchmark(aligner_fn, groups: list[dict]) -> pd.DataFrame:
         rows.append({"ref_class": ref_class, "sp": sp, "tc": tc, "time_s": elapsed})
     return pd.DataFrame(rows)
 
-def test_full_comparison(balibase_test, predictor):
+def test_full_comparison(dna_test_groups, predictor):
     """Финальная таблица сравнения всех методов."""
     methods = {
         "ClustalW":        lambda s, ids: run_clustalw(s, ids),
@@ -2392,7 +2355,7 @@ def test_full_comparison(balibase_test, predictor):
     all_results = {}
     for name, fn in methods.items():
         print(f"\nЗапуск {name}...")
-        df = run_benchmark(fn, balibase_test)
+        df = run_benchmark(fn, dna_test_groups)
         all_results[name] = df
         print(f"  SP={df.sp.mean():.3f}, TC={df.tc.mean():.3f}, "
               f"Time={df.time_s.mean():.2f}s")

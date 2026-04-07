@@ -28,7 +28,7 @@ DIPLOM/
 │
 ├── data/
 │   ├── simulate.py             # Synthetic training data generation (O(n) per sample)
-│   ├── loaders.py              # BAliBASE 3.0 dataset loader
+│   ├── loaders.py              # FASTA file loaders
 │   ├── processed/
 │   │   ├── train.parquet       # 49,998 DNA pairs (13.6 MB) ✅ READY
 │   │   └── val.parquet         # 9,999 DNA pairs (2.7 MB) ✅ READY
@@ -45,7 +45,7 @@ DIPLOM/
 │
 ├── model/
 │   ├── band_predictor.py       # BandPredictor CNN+MLP+Embedding neural network
-│   ├── train.py                # Two-stage training (pretrain synthetic + finetune BAliBASE)
+│   ├── train.py                # Training on synthetic data (DNA + protein)
 │   ├── evaluate.py             # Batched GPU inference with torch.compile
 │   └── __init__.py
 │
@@ -74,7 +74,7 @@ DIPLOM/
 │   ├── test_four_russians.py   # FR accumulation, speed, correctness
 │   ├── test_speed_pairwise.py  # Pairwise speedup benchmarks (300-5000bp)
 │   ├── test_neural_vs_fixed.py # Ablation + doubling reduction (needs checkpoint)
-│   ├── test_msa_quality.py     # MSA quality on BAliBASE (needs BAliBASE)
+│   ├── test_msa_quality.py     # MSA quality on synthetic DNA (needs checkpoint)
 │   └── __init__.py
 │
 ├── aligner.cp313-win_amd64.pyd # Compiled C++ module ✅ BUILT
@@ -227,18 +227,13 @@ data/cache/val/sample_0.npz
 
 ## Training Pipeline (`model/train.py`)
 
-### Two-Stage Training
+### Training
 
 **Stage 1 — Pretrain** (synthetic data):
 - WeightedRandomSampler: equal weight to low/medium/high divergence groups
 - AdamW optimizer, CosineAnnealingLR scheduler
 - Early stopping with patience=5 on band_recall@1x
 - Checkpoints: `best_model.pt` + every 5 epochs
-
-**Stage 2 — Finetune** (optional, needs BAliBASE):
-- 80% synthetic + 20% BAliBASE mix
-- Lower learning rate (0.1× pretrain)
-- Separate patience counter
 
 ### CLI Usage
 
@@ -248,11 +243,9 @@ python -m model.train \
   --cache_dir data/cache \
   --checkpoint_dir checkpoints \
   --epochs_pretrain 20 \
-  --epochs_finetune 10 \
   --batch_size 128 \
   --device cuda \
-  --patience 5 \
-  --balibase_parquet data/balibase.parquet  # optional
+  --patience 5
 ```
 
 ### Metrics Logged Per Epoch
@@ -325,7 +318,7 @@ msa = iterative_refine(msa, sequences, predictor, seq_type="dna")
 | `test_four_russians.py` | 3 | All PASS | Table growth, speed, correctness |
 | `test_speed_pairwise.py` | 6 | All PASS | Speedup verified 300–5000bp |
 | `test_neural_vs_fixed.py` | 2 | SKIP | Need trained checkpoint |
-| `test_msa_quality.py` | 2 | SKIP | Need BAliBASE dataset |
+| `test_msa_quality.py` | 2 | SKIP | Need trained checkpoint |
 
 ---
 
@@ -393,8 +386,7 @@ python -m model.train \
 
 ## Known Issues / TODOs
 
-1. **BAliBASE not downloaded** — Stage 2 finetune is skipped. Download from http://www.lbgi.fr/balibase/ and convert to parquet for Stage 2.
-2. **Protein training data** — Currently only DNA pairs generated. To add protein pairs, run: `python -m data.simulate --n_samples 50000 --seq_type protein --output data/processed/train_protein.parquet`
+1. **Protein training data** — To add protein pairs, run: `python -m data.simulate --n_samples 50000 --seq_type protein --output data/processed/train_protein.parquet`
 3. **`→` character in print** — Fixed to `->` for Windows cp1251 compatibility.
 4. **Cache I/O bottleneck** — 50k individual `.npz` files cause slow first epoch on HDD. On SSD/GPU instance this is negligible.
 5. **C++ module needs recompile on Linux** — `setup.py build_ext --inplace` handles this, but gcc/g++ must be installed.

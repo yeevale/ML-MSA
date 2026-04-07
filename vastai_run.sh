@@ -105,74 +105,10 @@ TRAIN_PARQUET="data/processed/train_combined.parquet"
 echo "Data generation complete."
 
 # --------------------------------------------------------------------------
-# STEP 2: BAliBASE Preparation (if available)
+# STEP 2: Neural Network Training
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 2: BAliBASE Preparation ==="
-
-BALIBASE_DIR="data/raw/balibase/DATASET-BALiBASE"
-BALIBASE_AVAILABLE=0
-if [ -d "$BALIBASE_DIR" ]; then
-    echo "Converting BAliBASE to splits..."
-    python -c "
-from data.loaders import BAliBASELoader
-import json
-import pandas as pd
-
-loader = BAliBASELoader('$BALIBASE_DIR')
-groups = loader.load_all()
-print(f'Loaded {len(groups)} BAliBASE groups')
-
-train_g, val_g, test_g = loader.train_val_test_split()
-print(f'Train: {len(train_g)}, Val: {len(val_g)}, Test: {len(test_g)}')
-
-for split_name, split_data in [('train', train_g), ('val', val_g), ('test', test_g)]:
-    # Save JSON (for reference)
-    with open(f'data/balibase_{split_name}.json', 'w') as f:
-        json.dump(split_data, f, default=str)
-    print(f'Saved balibase_{split_name}.json')
-
-# Also save train split as parquet for model.train Stage 2
-rows = []
-for g in train_g:
-    seqs = g['sequences']
-    ids = g.get('seq_ids', [f'seq{i}' for i in range(len(seqs))])
-    # Create all pairwise combinations
-    for i in range(len(seqs)):
-        for j in range(i + 1, len(seqs)):
-            s1, s2 = seqs[i], seqs[j]
-            n = max(len(s1), len(s2))
-            # Simple divergence estimate
-            min_len = min(len(s1), len(s2))
-            mismatches = sum(1 for a, b in zip(s1[:min_len], s2[:min_len]) if a != b)
-            div = mismatches / max(min_len, 1)
-            # seq_type: detect protein (has non-ACGT chars)
-            charset = set(s1.upper() + s2.upper())
-            is_protein = bool(charset - set('ACGTNU-'))
-            rows.append({
-                'seq1': s1, 'seq2': s2,
-                'centre_diag': 0,
-                'true_half_width': max(10, int(n * 0.15)),
-                'divergence': round(div, 4),
-                'seq_type': 'protein' if is_protein else 'dna',
-            })
-if rows:
-    df = pd.DataFrame(rows)
-    df.to_parquet('data/balibase_train.parquet', index=False)
-    print(f'Saved balibase_train.parquet ({len(df)} pairs)')
-else:
-    print('WARNING: No BAliBASE pairs generated')
-" 2>&1 | tee logs/balibase_prep.log
-    BALIBASE_AVAILABLE=1
-else
-    echo "BAliBASE not found - MSA quality experiments will be skipped"
-fi
-
-# --------------------------------------------------------------------------
-# STEP 3: Neural Network Training (Stage 1 — Synthetic)
-# --------------------------------------------------------------------------
-echo ""
-echo "=== STEP 3: Neural Network Training (Stage 1 - Synthetic) ==="
+echo "=== STEP 2: Neural Network Training ==="
 echo "Started: $(date)"
 
 # Clear old checkpoints from previous runs (keep feature cache!)
@@ -203,63 +139,25 @@ python -m model.train \
     --checkpoint_dir checkpoints \
     --results_dir results/training \
     --epochs_pretrain 5 \
-    --epochs_finetune 0 \
     --batch_size 512 \
     --num_workers 16 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
     --patience 10 \
     --device cuda \
-    2>&1 | tee logs/training_stage1.log
+    2>&1 | tee logs/training.log
 
-echo "Stage 1 complete: $(date)"
-
-# --------------------------------------------------------------------------
-# STEP 4: Fine-tuning on BAliBASE (Stage 2 — if available)
-# --------------------------------------------------------------------------
-if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
-    echo ""
-    echo "=== STEP 4: Fine-tuning on BAliBASE (Stage 2) ==="
-    echo "Started: $(date)"
-
-    python -m model.train \
-        --data_dir data/processed \
-        --train_parquet $TRAIN_PARQUET \
-        --balibase_parquet data/balibase_train.parquet \
-        --cache_dir data/cache \
-        --checkpoint_dir checkpoints \
-        --results_dir results/training \
-        --resume checkpoints/best_model.pt \
-        --epochs_pretrain 0 \
-        --epochs_finetune 5 \
-        --lr 1e-4 \
-        --batch_size 128 \
-        --num_workers 16 \
-        --patience 10 \
-        --device cuda \
-        2>&1 | tee logs/training_stage2.log
-
-    echo "Stage 2 complete: $(date)"
-else
-    echo ""
-    echo "=== STEP 4: Skipped (no BAliBASE) ==="
-fi
+echo "Training complete: $(date)"
 
 # --------------------------------------------------------------------------
-# STEP 5: Run All Experiments
+# STEP 3: Run All Experiments
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 5: Running All Experiments ==="
+echo "=== STEP 3: Running All Experiments ==="
 echo "Started: $(date)"
-
-BALIBASE_TEST_ARG=""
-if [ "$BALIBASE_AVAILABLE" -eq "1" ]; then
-    BALIBASE_TEST_ARG="--balibase_dir $BALIBASE_DIR"
-fi
 
 python experiments/run_all.py \
     --checkpoint checkpoints/best_model.pt \
-    $BALIBASE_TEST_ARG \
     --results_dir results/experiments \
     --device cuda \
     2>&1 | tee logs/experiments.log
@@ -267,20 +165,20 @@ python experiments/run_all.py \
 echo "Experiments complete: $(date)"
 
 # --------------------------------------------------------------------------
-# STEP 6: Full Test Suite
+# STEP 4: Full Test Suite
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 6: Full Test Suite ==="
+echo "=== STEP 4: Full Test Suite ==="
 
 python -m pytest tests/ \
     -v --tb=short \
     2>&1 | tee logs/test_full.log
 
 # --------------------------------------------------------------------------
-# STEP 7: Generate Final Report
+# STEP 5: Generate Final Report
 # --------------------------------------------------------------------------
 echo ""
-echo "=== STEP 7: Generating Final Report ==="
+echo "=== STEP 5: Generating Final Report ==="
 
 python results/interpret_results.py \
     --results_dir results \

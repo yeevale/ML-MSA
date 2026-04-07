@@ -1,4 +1,4 @@
-# scoring/metrics.py — Standard MSA quality metrics (BAliBASE benchmark).
+# scoring/metrics.py — Standard MSA quality metrics.
 # SP-score and TC-score computed against reference alignment.
 # sp_score_internal — for iterative refinement (no reference needed).
 # benchmark() — run aligner on dataset, measure SP, TC, time, memory.
@@ -119,7 +119,7 @@ def _match_and_reorder(predicted_msa: list[str],
 
 def sp_score(predicted_msa: list[str],
              reference_msa: list[str]) -> float:
-    """Sum-of-Pairs score (BAliBASE standard).
+    """Sum-of-Pairs score.
     Handles sequence order mismatch by matching ungapped content."""
     try:
         # Fix 1: uppercase everything
