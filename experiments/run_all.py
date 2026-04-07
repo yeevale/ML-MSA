@@ -323,6 +323,310 @@ def exp_fr_hit_ratio(results_dir: str) -> dict:
     }
 
 
+def _generate_dna_msa_group(n_seqs: int, root_len: int, divergence: str,
+                            rng: np.random.Generator) -> dict:
+    """Generate a synthetic DNA MSA group with a known reference alignment.
+
+    Creates a root sequence, mutates it n_seqs times independently, and
+    builds a reference MSA from the known mutation paths by inserting gaps
+    so that homologous positions share the same column.
+
+    Returns dict with keys: sequences, seq_ids, reference, group_id, ref_class.
+    """
+    from data.simulate import mutate_with_alignment, sample_mutation_params
+
+    alphabet = "ACGT"
+    root = "".join(rng.choice(list(alphabet), root_len))
+    p_sub, p_ins, p_del = sample_mutation_params(divergence, rng)
+
+    seqs: list[str] = []
+    paths: list[list[tuple[int, int]]] = []  # (root_pos, child_pos)
+    for _ in range(n_seqs):
+        child, path = mutate_with_alignment(root, p_sub, p_ins, p_del, alphabet, rng)
+        if len(child) < 5 or not path:
+            # Retry once with lower mutation
+            child, path = mutate_with_alignment(root, p_sub * 0.5, 0.0, 0.0, alphabet, rng)
+        seqs.append(child)
+        paths.append(path)
+
+    # Build reference alignment from known paths.
+    # For each child, build a map: root_position → child_position.
+    # The reference MSA aligns all children at shared root positions.
+    # We also need to account for insertions (child positions not mapped to root).
+
+    # Collect all root positions that are covered by at least one child
+    all_root_positions = set()
+    root_to_child: list[dict[int, int]] = []
+    child_insertions: list[list[tuple[int, list[int]]]] = []
+
+    for k, path in enumerate(paths):
+        r2c: dict[int, int] = {}
+        for root_pos, child_pos in path:
+            r2c[root_pos] = child_pos
+            all_root_positions.add(root_pos)
+        root_to_child.append(r2c)
+
+        # Find insertions: child positions NOT in any path mapping
+        mapped_child_positions = set(r2c.values())
+        ins_positions: list[tuple[int, list[int]]] = []
+        current_ins: list[int] = []
+        # Group consecutive insertions by the root position they follow
+        child_positions_sorted = sorted(r2c.items(), key=lambda x: x[1])
+        all_child_positions = list(range(len(seqs[k])))
+
+        # Build insertion list between mapped positions
+        prev_child = -1
+        prev_root = -1
+        for root_pos, child_pos in child_positions_sorted:
+            # Any child positions between prev_child+1 and child_pos-1 are insertions
+            ins = list(range(prev_child + 1, child_pos))
+            if ins:
+                ins_positions.append((prev_root, ins))
+            prev_child = child_pos
+            prev_root = root_pos
+        # Trailing insertions after last mapped position
+        if prev_child < len(seqs[k]) - 1:
+            trailing = list(range(prev_child + 1, len(seqs[k])))
+            if trailing:
+                ins_positions.append((prev_root, trailing))
+
+        child_insertions.append(ins_positions)
+
+    sorted_root_positions = sorted(all_root_positions)
+
+    # Build alignment columns:
+    # 1. For each root position (in order), one column
+    # 2. Before each root position, insert columns for any child insertions
+
+    ref_alignment: list[list[str]] = [[] for _ in range(n_seqs)]
+
+    for idx, root_pos in enumerate(sorted_root_positions):
+        prev_root_pos = sorted_root_positions[idx - 1] if idx > 0 else -1
+
+        # Handle insertions that fall between prev_root_pos and root_pos
+        max_ins_len = 0
+        ins_per_child: list[list[str]] = []
+        for k in range(n_seqs):
+            ins_chars: list[str] = []
+            for after_root, positions in child_insertions[k]:
+                if after_root == prev_root_pos:
+                    ins_chars = [seqs[k][p] for p in positions]
+                    break
+            ins_per_child.append(ins_chars)
+            max_ins_len = max(max_ins_len, len(ins_chars))
+
+        # Pad insertion columns
+        for col_j in range(max_ins_len):
+            for k in range(n_seqs):
+                if col_j < len(ins_per_child[k]):
+                    ref_alignment[k].append(ins_per_child[k][col_j])
+                else:
+                    ref_alignment[k].append('-')
+
+        # Main column for this root position
+        for k in range(n_seqs):
+            if root_pos in root_to_child[k]:
+                ref_alignment[k].append(seqs[k][root_to_child[k][root_pos]])
+            else:
+                ref_alignment[k].append('-')
+
+    # Trailing insertions after last root position
+    last_root_pos = sorted_root_positions[-1] if sorted_root_positions else -1
+    max_trail = 0
+    trail_per_child: list[list[str]] = []
+    for k in range(n_seqs):
+        trail_chars: list[str] = []
+        for after_root, positions in child_insertions[k]:
+            if after_root == last_root_pos:
+                trail_chars = [seqs[k][p] for p in positions]
+                break
+        trail_per_child.append(trail_chars)
+        max_trail = max(max_trail, len(trail_chars))
+    for col_j in range(max_trail):
+        for k in range(n_seqs):
+            if col_j < len(trail_per_child[k]):
+                ref_alignment[k].append(trail_per_child[k][col_j])
+            else:
+                ref_alignment[k].append('-')
+
+    reference = ["".join(row) for row in ref_alignment]
+    ids = [f"syn_{divergence}_{i}" for i in range(n_seqs)]
+
+    return {
+        "sequences": seqs,
+        "seq_ids": ids,
+        "reference": reference,
+        "group_id": f"syn_{divergence}_{root_len}bp_{n_seqs}seqs",
+        "ref_class": f"synthetic_{divergence}",
+    }
+
+
+def exp_msa_quality_dna(predictor, results_dir: str) -> dict:
+    """
+    Experiment 5b: MSA quality on synthetic DNA data.
+
+    Generates groups of DNA sequences with known true alignments from
+    a shared root ancestor. Compares the same 7 methods as exp_msa_quality
+    but on DNA (the domain the neural model was trained on), eliminating
+    BAliBASE domain shift.
+
+    Groups: 30 total (10 per divergence level × 3 group sizes).
+    """
+    import tracemalloc
+    from msa.progressive_msa import progressive_msa
+    from msa.iterative_refine import iterative_refine
+    from baselines.classical import run_mafft, run_muscle, run_clustalw
+    from scoring.metrics import sp_score, tc_score
+
+    rng = np.random.default_rng(2026)
+
+    # Generate 30 synthetic groups
+    groups: list[dict] = []
+    for div in ["low", "medium", "high"]:
+        for n_seqs in [5, 10, 20]:
+            for rep in range(3):
+                root_len = rng.integers(100, 400)
+                g = _generate_dna_msa_group(n_seqs, int(root_len), div, rng)
+                g["group_id"] = f"syn_{div}_{n_seqs}seqs_r{rep}"
+                groups.append(g)
+            # One extra with longer sequences
+            g = _generate_dna_msa_group(n_seqs, rng.integers(400, 600), div, rng)
+            g["group_id"] = f"syn_{div}_{n_seqs}seqs_long"
+            groups.append(g)
+
+    print(f"  Generated {len(groups)} synthetic DNA groups")
+
+    def measure(fn, seqs, ids, ref):
+        """Measure SP, TC, time and memory for an MSA method."""
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        try:
+            msa_result = fn(seqs, ids)
+            elapsed = time.perf_counter() - t0
+            _, peak_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
+            if not msa_result or not all(isinstance(s, str) for s in msa_result):
+                return {"sp": 0, "tc": 0, "time_s": round(elapsed, 3),
+                        "mem_mb": round(peak_mem / 1e6, 2), "ok": False,
+                        "error": "MSA result is empty or not strings"}
+
+            ref_valid = (ref is not None
+                         and len(ref) > 0
+                         and all(isinstance(s, str) for s in ref)
+                         and all(len(s) == len(ref[0]) for s in ref)
+                         and any('-' in s for s in ref))
+            if ref_valid and len(ref) == len(msa_result):
+                sp = sp_score(msa_result, ref)
+                tc = tc_score(msa_result, ref)
+            else:
+                sp = -1.0
+                tc = -1.0
+            return {"sp": round(sp, 4), "tc": round(tc, 4),
+                    "time_s": round(elapsed, 3), "mem_mb": round(peak_mem / 1e6, 2), "ok": True}
+        except Exception as e:
+            tracemalloc.stop()
+            return {"sp": 0, "tc": 0, "time_s": 999, "mem_mb": 0,
+                    "ok": False, "error": str(e)}
+
+    def _detect_seq_type(seqs: list[str]) -> str:
+        sample = "".join(s[:100] for s in seqs[:5]).upper()
+        non_dna = sum(1 for c in sample if c not in "ACGTNU-")
+        return "protein" if non_dna > len(sample) * 0.1 else "dna"
+
+    import aligner
+
+    def fixed_band_pairwise(seqs, ids, hw=30):
+        if len(seqs) <= 1:
+            return seqs
+        st = _detect_seq_type(seqs)
+        class FixedPredictor:
+            def predict_single(self, s1, s2, seq_type="dna"):
+                return (0, hw)
+            def predict_batch(self, pairs, seq_type="dna"):
+                return [(0, hw) for _ in pairs]
+        return progressive_msa(seqs, ids, FixedPredictor(), seq_type=st)
+
+    methods = {}
+
+    try:
+        methods["MAFFT"] = lambda s, ids: run_mafft(s, ids)
+    except Exception:
+        pass
+    try:
+        methods["MUSCLE"] = lambda s, ids: run_muscle(s, ids)
+    except Exception:
+        pass
+    try:
+        methods["ClustalW"] = lambda s, ids: run_clustalw(s, ids)
+    except Exception:
+        pass
+
+    methods["Fixed_W30"]  = lambda s, ids: fixed_band_pairwise(s, ids, hw=30)
+    methods["Fixed_W100"] = lambda s, ids: fixed_band_pairwise(s, ids, hw=100)
+
+    def neural_band(s, ids):
+        return progressive_msa(s, ids, predictor, seq_type="dna")
+
+    def neural_refine(s, ids):
+        msa = progressive_msa(s, ids, predictor, seq_type="dna")
+        return iterative_refine(msa, s, predictor)
+
+    methods["Neural_band"]     = neural_band
+    methods["Neural_+_refine"] = neural_refine
+
+    all_rows = []
+    for method_name, method_fn in methods.items():
+        print(f"\n  Running {method_name}...")
+        for g in groups:
+            r = measure(method_fn, g["sequences"], g["seq_ids"], g["reference"])
+            r["method"] = method_name
+            r["group_id"] = g["group_id"]
+            r["ref_class"] = g.get("ref_class", "")
+            r["n_seqs"] = len(g["sequences"])
+            r["divergence"] = g["ref_class"].replace("synthetic_", "")
+            all_rows.append(r)
+            if r["ok"]:
+                print(f"    {g['group_id']}: SP={r['sp']:.3f}, TC={r['tc']:.3f}, "
+                      f"t={r['time_s']:.2f}s")
+            else:
+                print(f"    {g['group_id']}: ERROR: {r.get('error', 'unknown')}")
+
+    df = pd.DataFrame(all_rows)
+    detail_csv = os.path.join(results_dir, "msa_quality_dna_detail.csv")
+    df.to_csv(detail_csv, index=False)
+
+    summary_data = {}
+    if len(df[df["ok"]]) > 0:
+        summary = df[df["ok"]].groupby("method").agg(
+            SP_mean=("sp", "mean"),
+            TC_mean=("tc", "mean"),
+            Time_mean=("time_s", "mean"),
+            Mem_MB_mean=("mem_mb", "mean"),
+        ).round(4)
+        summary_csv = os.path.join(results_dir, "msa_quality_dna_summary.csv")
+        summary.to_csv(summary_csv)
+        summary_data = summary.to_dict()
+        print("\n  Summary (DNA):")
+        print(summary.to_string())
+
+        # Per-divergence breakdown
+        by_div = df[df["ok"]].groupby(["divergence", "method"]).agg(
+            SP_mean=("sp", "mean"),
+            TC_mean=("tc", "mean"),
+        ).round(4)
+        div_csv = os.path.join(results_dir, "msa_quality_dna_by_divergence.csv")
+        by_div.to_csv(div_csv)
+        print("\n  By divergence:")
+        print(by_div.to_string())
+
+    return {
+        "summary": summary_data,
+        "n_groups": len(groups),
+        "detail_csv": detail_csv,
+    }
+
+
 def exp_msa_quality(predictor, balibase_groups: list, results_dir: str) -> dict:
     """
     Experiment 5: MSA quality on BAliBASE.
@@ -691,6 +995,14 @@ def main():
         all_results["msa_quality"] = run_experiment(
             "msa_quality",
             lambda: exp_msa_quality(predictor, balibase_groups, args.results_dir),
+            args.results_dir
+        )
+
+    # Experiment 5b: MSA quality on synthetic DNA (needs model, no BAliBASE needed)
+    if "msa_quality_dna" not in args.skip and model_available:
+        all_results["msa_quality_dna"] = run_experiment(
+            "msa_quality_dna",
+            lambda: exp_msa_quality_dna(predictor, args.results_dir),
             args.results_dir
         )
 
