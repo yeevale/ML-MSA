@@ -231,17 +231,26 @@ def generate_report(results_dir: str, output: str):
     scaling = load_json(os.path.join(exp_dir, "scaling_by_n.json"))
     if scaling and scaling.get("_status") == "OK":
         lines.append("")
-        lines.append("| N | MAFFT (s) | Neural (s) | Speedup |")
-        lines.append("|---|---|---|---|")
+        lines.append("| N | MAFFT (s) | MUSCLE (s) | ClustalW (s) | Neural (s) "
+                     "| vs MAFFT | vs MUSCLE | vs ClustalW |")
+        lines.append("|---|---|---|---|---|---|---|---|")
         for row in scaling.get("rows", []):
-            t_mafft = fmt(row.get("t_mafft_s"), 2) if row.get("t_mafft_s") else "N/A"
-            t_neural = fmt(row.get("t_neural_s"), 2)
-            speedup_val = f"{row['speedup']}x" if row.get("speedup") else "N/A"
+            t_mafft    = fmt(row.get("t_mafft_s"), 2) if row.get("t_mafft_s") else "N/A"
+            t_muscle   = fmt(row.get("t_muscle_s"), 2) if row.get("t_muscle_s") else "N/A"
+            t_clustalw = fmt(row.get("t_clustalw_s"), 2) if row.get("t_clustalw_s") else "N/A"
+            t_neural   = fmt(row.get("t_neural_s"), 2)
+            sp_mafft    = f"{row['speedup_vs_mafft']}x" if row.get("speedup_vs_mafft") else "N/A"
+            sp_muscle   = f"{row['speedup_vs_muscle']}x" if row.get("speedup_vs_muscle") else "N/A"
+            sp_clustalw = f"{row['speedup_vs_clustalw']}x" if row.get("speedup_vs_clustalw") else "N/A"
             lines.append(
                 f"| {row.get('n_seqs')} "
                 f"| {t_mafft} "
+                f"| {t_muscle} "
+                f"| {t_clustalw} "
                 f"| {t_neural} "
-                f"| {speedup_val} |"
+                f"| {sp_mafft} "
+                f"| {sp_muscle} "
+                f"| {sp_clustalw} |"
             )
     else:
         lines.append("")

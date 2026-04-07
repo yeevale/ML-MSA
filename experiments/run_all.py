@@ -589,11 +589,11 @@ def exp_msa_quality(predictor, results_dir: str) -> dict:
 
 def exp_scaling_by_n(predictor, results_dir: str) -> dict:
     """
-    Experiment 6: Scaling by number of sequences N.
-    Compare MAFFT vs Neural band at N = 10, 20, 50, 100.
+    Experiment 5: Scaling by number of sequences N.
+    Compare MAFFT, MUSCLE, ClustalW vs Neural band at N = 10, 20, 50, 100.
     """
     from msa.progressive_msa import progressive_msa
-    from baselines.classical import run_mafft
+    from baselines.classical import run_mafft, run_muscle, run_clustalw
 
     DNA = "ACGT"
     rng = np.random.default_rng(0)
@@ -609,34 +609,52 @@ def exp_scaling_by_n(predictor, results_dir: str) -> dict:
             seqs.append("".join(s))
         return seqs
 
+    baselines = {
+        "MAFFT":    run_mafft,
+        "MUSCLE":   run_muscle,
+        "ClustalW": run_clustalw,
+    }
+
     rows = []
     for n in [10, 20, 50, 100]:
         seqs = gen_seqs(n)
         ids = [f"seq{i}" for i in range(n)]
 
-        # MAFFT
-        t_mafft = None
-        try:
-            t0 = time.perf_counter()
-            run_mafft(seqs, ids)
-            t_mafft = time.perf_counter() - t0
-        except Exception as e:
-            print(f"  MAFFT failed for N={n}: {e}")
+        row: dict = {"n_seqs": n}
+
+        # Classical baselines
+        for name, fn in baselines.items():
+            key = name.lower()
+            try:
+                t0 = time.perf_counter()
+                fn(seqs, ids)
+                elapsed = time.perf_counter() - t0
+                row[f"t_{key}_s"] = round(elapsed, 2)
+            except Exception as e:
+                print(f"  {name} failed for N={n}: {e}")
+                row[f"t_{key}_s"] = None
 
         # Neural
         t0 = time.perf_counter()
         progressive_msa(seqs, ids, predictor)
         t_neural = time.perf_counter() - t0
+        row["t_neural_s"] = round(t_neural, 2)
 
-        speedup = round(t_mafft / t_neural, 2) if t_mafft else None
-        rows.append({
-            "n_seqs":     n,
-            "t_mafft_s":  round(t_mafft, 2) if t_mafft else None,
-            "t_neural_s": round(t_neural, 2),
-            "speedup":    speedup,
-        })
-        mafft_str = f"{t_mafft:.2f}s" if t_mafft else "N/A"
-        print(f"  N={n:4d}: MAFFT={mafft_str}, Neural={t_neural:.2f}s")
+        # Speedups
+        for name in baselines:
+            key = name.lower()
+            t_base = row.get(f"t_{key}_s")
+            row[f"speedup_vs_{key}"] = round(t_base / t_neural, 2) if t_base else None
+
+        rows.append(row)
+
+        parts = [f"N={n:4d}:"]
+        for name in baselines:
+            key = name.lower()
+            t = row.get(f"t_{key}_s")
+            parts.append(f"{name}={t:.2f}s" if t else f"{name}=N/A")
+        parts.append(f"Neural={t_neural:.2f}s")
+        print(f"  {' '.join(parts)}")
 
     df = pd.DataFrame(rows)
     csv_path = os.path.join(results_dir, "scaling_by_n.csv")
